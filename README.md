@@ -1,3 +1,3 @@
 # Sladder
 
-**Sladder** is simple cluster membership framework.
+**Sladder** is simple and embeded membership framework for service discovery and cluster management.

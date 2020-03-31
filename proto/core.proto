@@ -2,8 +2,15 @@ syntax = "proto3";
 
 package proto;
 
-message KeyValue {
-    string key = 1;
-    string value = 2;
-    bytes extras = 3;
+message Node {
+    message KeyValue {
+        string key = 1;
+        string value = 2;
+    }
+
+    repeated KeyValue kvs = 1;
+}
+
+message Cluster {
+    repeated Node nodes = 1;
 }

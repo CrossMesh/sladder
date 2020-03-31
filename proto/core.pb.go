@@ -20,63 +20,135 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
-type KeyValue struct {
+type Node struct {
+	Kvs                  []*Node_KeyValue `protobuf:"bytes,1,rep,name=kvs,proto3" json:"kvs,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
+	XXX_unrecognized     []byte           `json:"-"`
+	XXX_sizecache        int32            `json:"-"`
+}
+
+func (m *Node) Reset()         { *m = Node{} }
+func (m *Node) String() string { return proto.CompactTextString(m) }
+func (*Node) ProtoMessage()    {}
+func (*Node) Descriptor() ([]byte, []int) {
+	return fileDescriptor_a4b0acae2797acdd, []int{0}
+}
+
+func (m *Node) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Node.Unmarshal(m, b)
+}
+func (m *Node) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Node.Marshal(b, m, deterministic)
+}
+func (m *Node) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Node.Merge(m, src)
+}
+func (m *Node) XXX_Size() int {
+	return xxx_messageInfo_Node.Size(m)
+}
+func (m *Node) XXX_DiscardUnknown() {
+	xxx_messageInfo_Node.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Node proto.InternalMessageInfo
+
+func (m *Node) GetKvs() []*Node_KeyValue {
+	if m != nil {
+		return m.Kvs
+	}
+	return nil
+}
+
+type Node_KeyValue struct {
 	Key                  string   `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	Value                string   `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	Extras               []byte   `protobuf:"bytes,3,opt,name=extras,proto3" json:"extras,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
 }
 
-func (m *KeyValue) Reset()         { *m = KeyValue{} }
-func (m *KeyValue) String() string { return proto.CompactTextString(m) }
-func (*KeyValue) ProtoMessage()    {}
-func (*KeyValue) Descriptor() ([]byte, []int) {
-	return fileDescriptor_a4b0acae2797acdd, []int{0}
+func (m *Node_KeyValue) Reset()         { *m = Node_KeyValue{} }
+func (m *Node_KeyValue) String() string { return proto.CompactTextString(m) }
+func (*Node_KeyValue) ProtoMessage()    {}
+func (*Node_KeyValue) Descriptor() ([]byte, []int) {
+	return fileDescriptor_a4b0acae2797acdd, []int{0, 0}
 }
 
-func (m *KeyValue) XXX_Unmarshal(b []byte) error {
-	return xxx_messageInfo_KeyValue.Unmarshal(m, b)
+func (m *Node_KeyValue) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Node_KeyValue.Unmarshal(m, b)
 }
-func (m *KeyValue) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	return xxx_messageInfo_KeyValue.Marshal(b, m, deterministic)
+func (m *Node_KeyValue) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Node_KeyValue.Marshal(b, m, deterministic)
 }
-func (m *KeyValue) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_KeyValue.Merge(m, src)
+func (m *Node_KeyValue) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Node_KeyValue.Merge(m, src)
 }
-func (m *KeyValue) XXX_Size() int {
-	return xxx_messageInfo_KeyValue.Size(m)
+func (m *Node_KeyValue) XXX_Size() int {
+	return xxx_messageInfo_Node_KeyValue.Size(m)
 }
-func (m *KeyValue) XXX_DiscardUnknown() {
-	xxx_messageInfo_KeyValue.DiscardUnknown(m)
+func (m *Node_KeyValue) XXX_DiscardUnknown() {
+	xxx_messageInfo_Node_KeyValue.DiscardUnknown(m)
 }
 
-var xxx_messageInfo_KeyValue proto.InternalMessageInfo
+var xxx_messageInfo_Node_KeyValue proto.InternalMessageInfo
 
-func (m *KeyValue) GetKey() string {
+func (m *Node_KeyValue) GetKey() string {
 	if m != nil {
 		return m.Key
 	}
 	return ""
 }
 
-func (m *KeyValue) GetValue() string {
+func (m *Node_KeyValue) GetValue() string {
 	if m != nil {
 		return m.Value
 	}
 	return ""
 }
 
-func (m *KeyValue) GetExtras() []byte {
+type Cluster struct {
+	Nodes                []*Node  `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Cluster) Reset()         { *m = Cluster{} }
+func (m *Cluster) String() string { return proto.CompactTextString(m) }
+func (*Cluster) ProtoMessage()    {}
+func (*Cluster) Descriptor() ([]byte, []int) {
+	return fileDescriptor_a4b0acae2797acdd, []int{1}
+}
+
+func (m *Cluster) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_Cluster.Unmarshal(m, b)
+}
+func (m *Cluster) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_Cluster.Marshal(b, m, deterministic)
+}
+func (m *Cluster) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Cluster.Merge(m, src)
+}
+func (m *Cluster) XXX_Size() int {
+	return xxx_messageInfo_Cluster.Size(m)
+}
+func (m *Cluster) XXX_DiscardUnknown() {
+	xxx_messageInfo_Cluster.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Cluster proto.InternalMessageInfo
+
+func (m *Cluster) GetNodes() []*Node {
 	if m != nil {
-		return m.Extras
+		return m.Nodes
 	}
 	return nil
 }
 
 func init() {
-	proto.RegisterType((*KeyValue)(nil), "proto.KeyValue")
+	proto.RegisterType((*Node)(nil), "proto.Node")
+	proto.RegisterType((*Node_KeyValue)(nil), "proto.Node.KeyValue")
+	proto.RegisterType((*Cluster)(nil), "proto.Cluster")
 }
 
 func init() {
@@ -84,12 +156,15 @@ func init() {
 }
 
 var fileDescriptor_a4b0acae2797acdd = []byte{
-	// 107 bytes of a gzipped FileDescriptorProto
+	// 149 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x12, 0x28, 0x28, 0xca, 0x2f,
-	0xc9, 0xd7, 0x4f, 0xce, 0x2f, 0x4a, 0xd5, 0x03, 0x33, 0x85, 0x58, 0xc1, 0x94, 0x92, 0x17, 0x17,
-	0x87, 0x77, 0x6a, 0x65, 0x58, 0x62, 0x4e, 0x69, 0xaa, 0x90, 0x00, 0x17, 0x73, 0x76, 0x6a, 0xa5,
-	0x04, 0xa3, 0x02, 0xa3, 0x06, 0x67, 0x10, 0x88, 0x29, 0x24, 0xc2, 0xc5, 0x5a, 0x06, 0x92, 0x92,
-	0x60, 0x02, 0x8b, 0x41, 0x38, 0x42, 0x62, 0x5c, 0x6c, 0xa9, 0x15, 0x25, 0x45, 0x89, 0xc5, 0x12,
-	0xcc, 0x0a, 0x8c, 0x1a, 0x3c, 0x41, 0x50, 0x5e, 0x12, 0x1b, 0xd8, 0x48, 0x63, 0x40, 0x00, 0x00,
-	0x00, 0xff, 0xff, 0x39, 0x91, 0xcc, 0xa4, 0x6d, 0x00, 0x00, 0x00,
+	0xc9, 0xd7, 0x4f, 0xce, 0x2f, 0x4a, 0xd5, 0x03, 0x33, 0x85, 0x58, 0xc1, 0x94, 0x52, 0x12, 0x17,
+	0x8b, 0x5f, 0x7e, 0x4a, 0xaa, 0x90, 0x1a, 0x17, 0x73, 0x76, 0x59, 0xb1, 0x04, 0xa3, 0x02, 0xb3,
+	0x06, 0xb7, 0x91, 0x08, 0x44, 0x8d, 0x1e, 0x48, 0x46, 0xcf, 0x3b, 0xb5, 0x32, 0x2c, 0x31, 0xa7,
+	0x34, 0x35, 0x08, 0xa4, 0x40, 0xca, 0x88, 0x8b, 0x03, 0x26, 0x20, 0x24, 0xc0, 0xc5, 0x9c, 0x9d,
+	0x5a, 0x29, 0xc1, 0xa8, 0xc0, 0xa8, 0xc1, 0x19, 0x04, 0x62, 0x0a, 0x89, 0x70, 0xb1, 0x96, 0x81,
+	0xa4, 0x24, 0x98, 0xc0, 0x62, 0x10, 0x8e, 0x92, 0x0e, 0x17, 0xbb, 0x73, 0x4e, 0x69, 0x71, 0x49,
+	0x6a, 0x91, 0x90, 0x22, 0x17, 0x6b, 0x5e, 0x7e, 0x4a, 0x2a, 0xcc, 0x22, 0x6e, 0x24, 0x8b, 0x82,
+	0x20, 0x32, 0x49, 0x6c, 0x60, 0x21, 0x63, 0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0x20, 0x89, 0x3a,
+	0x2e, 0xb3, 0x00, 0x00, 0x00,
 }

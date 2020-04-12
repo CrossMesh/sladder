@@ -1,10 +1,16 @@
 package sladder
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/sunmxt/sladder/proto"
+)
+
+var (
+	ErrCoordinatorMissing = errors.New("missing coordinator")
+	ErrInvalidKeyValue    = errors.New("invalid key value pair")
 )
 
 // Node represents members of cluster.
@@ -21,6 +27,48 @@ func newNode(cluster *Cluster) *Node {
 		cluster: cluster,
 		kvs:     make(map[string]*KeyValueEntry),
 	}
+}
+
+// Set sets KeyValue.
+func (n *Node) Set(key, value string) error {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	entry, exists := n.kvs[key]
+	if !exists {
+		// new KV.
+		n.cluster.lock.RLock()
+		coordinator, exists := n.cluster.coordinators[key]
+		n.cluster.lock.RUnlock()
+
+		if !exists {
+			return ErrCoordinatorMissing
+		}
+		entry = &KeyValueEntry{
+			KeyValue: KeyValue{
+				Key:   key,
+				Value: value,
+			},
+			coordinator: coordinator,
+		}
+		if !coordinator.Validate(entry.KeyValue) {
+			return ErrInvalidKeyValue
+		}
+		n.kvs[key] = entry
+		return nil
+	}
+
+	// modify existing entry.
+	if !entry.coordinator.Validate(KeyValue{
+		Key:   key,
+		Value: value,
+	}) {
+		return ErrInvalidKeyValue
+	}
+	entry.Value = value
+	entry.Key = key
+
+	return nil
 }
 
 func (n *Node) protobufSnapshot(message *proto.Node) {
@@ -121,6 +169,31 @@ func (n *Node) synchrionizeFromProtobufSnapshot(message *proto.Node) {
 		if accepted {
 			delete(n.kvs, key)
 		}
+	}
+
+	return
+}
+
+func (n *Node) get(key string) (entry *KeyValueEntry) {
+	entry, _ = n.kvs[key]
+	return
+}
+
+func (n *Node) replaceCoordinatorForce(key string, coordinator KVCoordinator) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	entry, exists := n.kvs[key]
+	if !exists {
+		return
+	}
+
+	// ensure that existing value is valid for new coordinator.
+	if !coordinator.Validate(entry.KeyValue) {
+		// drop entry in case of incompatiable coordinator.
+		delete(n.kvs, key)
+	} else {
+		entry.coordinator = coordinator // replace.
 	}
 
 	return

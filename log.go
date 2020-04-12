@@ -5,8 +5,15 @@ import (
 	"log"
 )
 
+type discardLogger struct {
+	*log.Logger
+}
+
+func (l *discardLogger) Warn(v ...interface{})                 {}
+func (l *discardLogger) Warnf(format string, v ...interface{}) {}
+
 var (
-	discardLogger = log.New(ioutil.Discard, "", 0)
+	defaultLogger = &discardLogger{Logger: log.New(ioutil.Discard, "", 0)}
 )
 
 // Logger is logging abstraction.

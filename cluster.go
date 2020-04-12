@@ -15,9 +15,6 @@ type NodeNameResolver interface {
 	Name(*Node) ([]string, error)
 }
 
-// EngineOption contains engine-specific parameters.
-type EngineOption interface{}
-
 // EngineInstance is live instance of engine.
 type EngineInstance interface {
 	Init(*Cluster) error
@@ -29,39 +26,79 @@ type Engine interface {
 	New(...EngineOption) (EngineInstance, error)
 }
 
+// Event is enum type of event in cluster scope.
+type Event uint
+
+const (
+	// EmptyNodeJoined tiggered after an empty node(with no name) joins cluster.
+	EmptyNodeJoined = Event(1)
+	// NodeJoined tiggered after node name is resolved and the node joins cluster.
+	NodeJoined = Event(2)
+)
+
+// ClusterEventHandler receives events of cluster.
+type ClusterEventHandler func(*ClusterEventContext, Event, *Node)
+
+// ClusterEventContext refers to event handler.
+type ClusterEventContext struct {
+	handler      ClusterEventHandler
+	unregistered bool
+}
+
+// Unregister cancels event handler.
+func (c *ClusterEventContext) Unregister() { c.unregistered = true }
+
 // Cluster contains a set of node.
 type Cluster struct {
 	lock sync.RWMutex
 
-	resolver     NodeNameResolver
-	engine       EngineInstance
-	coordinators map[string]KVCoordinator
-	nodes        map[string]*Node
-	emptyNodes   map[*Node]struct{}
+	resolver      NodeNameResolver
+	engine        EngineInstance
+	coordinators  map[string]KVCoordinator
+	eventHandlers map[*ClusterEventContext]struct{}
+	nodes         map[string]*Node
+	emptyNodes    map[*Node]struct{}
+	self          *Node
 
 	log Logger
 }
 
+// EngineOption contains engine-specific parameters.
+type EngineOption interface{}
+
 // NewClusterWithNameResolver creates new cluster.
-func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver, logger Logger) (c *Cluster, err error) {
+func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver, logger Logger) (c *Cluster, self *Node, err error) {
 	if resolver == nil {
-		return nil, ErrMissingNameResolver
+		return nil, nil, ErrMissingNameResolver
+	}
+	if logger == nil {
+		logger = defaultLogger
 	}
 	c = &Cluster{
-		resolver:     resolver,
-		engine:       engine,
-		coordinators: make(map[string]KVCoordinator),
-		nodes:        make(map[string]*Node),
-		emptyNodes:   make(map[*Node]struct{}),
-		log:          logger,
+		resolver:      resolver,
+		engine:        engine,
+		coordinators:  make(map[string]KVCoordinator),
+		nodes:         make(map[string]*Node),
+		emptyNodes:    make(map[*Node]struct{}),
+		eventHandlers: make(map[*ClusterEventContext]struct{}),
+		log:           logger,
 	}
 
 	// init engine for cluster.
 	if err = engine.Init(c); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	if self, err = c.NewNode(); err != nil {
+		return nil, nil, err
+	}
+	c.self = self
 
 	return
+}
+
+// Self returns self node.
+func (c *Cluster) Self() *Node {
+	return c.self
 }
 
 func (c *Cluster) clearKey(key string) {
@@ -77,33 +114,59 @@ func (c *Cluster) clearKey(key string) {
 	}
 }
 
-func (c *Cluster) replaceCoordinator(key string, coordinator KVCoordinator, forceReplace bool) error {
-	nodeSet := make(map[*Node]struct{})
+func (c *Cluster) replaceCoordinatorForce(key string, coordinator KVCoordinator) error {
+	// safety: we hold exclusive lock of cluster scope here. node cannot create new entry now.
+	// this keep coordinator of entry consistent.
 
+	nodeSet := make(map[*Node]struct{})
 	for _, node := range c.nodes {
 		if _, exists := nodeSet[node]; exists {
 			continue
 		}
 		nodeSet[node] = struct{}{}
+		node.replaceCoordinatorForce(key, coordinator)
+	}
 
-		// get kv entry.
-		entry, exists := node.kvs[key]
-		if !exists {
+	return nil
+}
+
+func (c *Cluster) replaceCoordinator(key string, coordinator KVCoordinator, forceReplace bool) error {
+
+	if forceReplace {
+		return c.replaceCoordinatorForce(key, coordinator)
+	}
+
+	nodeSet := make(map[*Node]struct{})
+	// all nodes should be locked to prevent from entry changing.
+	for _, node := range c.nodes {
+		if _, exists := nodeSet[node]; exists {
 			continue
 		}
-		// no locking for entry cause entire cluster is locked.
-		// ensure that existing value is valid for the the coordinator.
-		if !coordinator.Validate(entry.KeyValue) {
-			if !forceReplace {
-				return ErrIncompatibleCoordinator
-			}
+		nodeSet[node] = struct{}{}
+		node.lock.Lock()
+		defer node.lock.Unlock()
+	}
 
-			// erase entry in case of incompatiable corrdinator.
-			delete(node.kvs, key)
-		} else {
-			entry.coordinator = coordinator // replace
+	// ensure that existing value is valid for new coordinator.
+	for node := range nodeSet {
+		entry := node.get(key)
+		if entry == nil {
+			continue
+		}
+		if !coordinator.Validate(entry.KeyValue) {
+			return ErrIncompatibleCoordinator
 		}
 	}
+
+	// replace for all entry.
+	for node := range nodeSet {
+		entry := node.get(key)
+		if entry == nil {
+			continue
+		}
+		entry.coordinator = coordinator
+	}
+
 	return nil
 }
 
@@ -140,6 +203,7 @@ func (c *Cluster) registerNode(names []string, n *Node) {
 			c.nodes[name] = n
 		}
 		n.names = names
+		c.emitEvent(NodeJoined, n)
 		return
 	}
 
@@ -155,6 +219,8 @@ func (c *Cluster) NewNode() (*Node, error) {
 	defer c.lock.Unlock()
 
 	n := newNode(c)
+
+	c.emitEvent(EmptyNodeJoined, n)
 
 	names, err := c.resolver.Name(n)
 	if err != nil {
@@ -172,5 +238,100 @@ func (c *Cluster) NewNode() (*Node, error) {
 
 // Keys creates key context
 func (c *Cluster) Keys(keys ...string) *KeyContext {
+	return nil
+}
+
+// Watch registers event handler of cluster.
+func (c *Cluster) Watch(handler ClusterEventHandler) *ClusterEventContext {
+	if handler == nil {
+		return nil
+	}
+
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	ctx := &ClusterEventContext{
+		handler:      handler,
+		unregistered: false,
+	}
+	c.eventHandlers[ctx] = struct{}{}
+
+	return ctx
+}
+
+func (c *Cluster) emitEvent(event Event, node *Node) {
+	// call handlers.
+	for ctx := range c.eventHandlers {
+		if ctx.unregistered {
+			delete(c.eventHandlers, ctx)
+			continue
+		}
+
+		ctx.handler(ctx, event, node)
+
+		if ctx.unregistered {
+			delete(c.eventHandlers, ctx)
+		}
+	}
+}
+
+// RangeNodes iterate nodes.
+func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf bool) {
+	if visit == nil {
+		return
+	}
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	nameSet := make(map[string]struct{}, len(c.nodes))
+	for name, node := range c.nodes {
+		if _, exist := nameSet[name]; exist {
+			continue
+		}
+		nameSet[name] = struct{}{}
+		if excludeSelf && node == c.self {
+			continue
+		}
+		if !visit(node) {
+			break
+		}
+	}
+}
+
+// RemoveNode removes node from cluster.
+func (c *Cluster) RemoveNode(node *Node) (removed bool) {
+	if node == nil {
+		return false
+	}
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// remove from empty node set.
+	if _, exists := c.emptyNodes[node]; exists {
+		delete(c.emptyNodes, node)
+		return true
+	}
+
+	// remove from node set.
+	var lastNode *Node
+	for _, name := range node.names {
+		if expected, exists := c.nodes[name]; !exists {
+			continue
+		} else if expected != node {
+			if removed && lastNode != expected {
+				// should not happen but log just in case.
+				c.log.Warn("inconsisient node record with node ID \"%v\"", name)
+			}
+			continue
+		} else {
+			delete(c.nodes, name)
+			lastNode = expected
+			removed = true
+		}
+	}
+
+	return
+}
+
+// Quit sends "leave" message to cluster and shops member sync.
+func (c *Cluster) Quit() error {
 	return nil
 }

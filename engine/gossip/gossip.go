@@ -2,6 +2,8 @@ package gossip
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/sunmxt/sladder"
@@ -76,6 +78,9 @@ type EngineInstance struct {
 	SuspectTimeout time.Duration
 	Region         string
 
+	lock       sync.Mutex
+	stop       chan struct{}
+	cluster    *sladder.Cluster
 	withRegion map[string]map[*sladder.Node]struct{}
 
 	transport Transport
@@ -94,12 +99,29 @@ func newInstanceDefault() *EngineInstance {
 func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event sladder.Event, node *sladder.Node) {
 	switch event {
 	case sladder.EmptyNodeJoined:
-		node.Set(e.swimTagKey, "") // insert SWIM tag.
+		tag := ""
+		if e.cluster.Self() == node {
+			raw, err := json.Marshal(SWIMTags{
+				Region: e.Region,
+			})
+			if err != nil {
+				panic(fmt.Sprintf("cannot marshal SWIMTags: %v", err.Error()))
+			}
+			tag = string(raw)
+		}
+		node.Set(e.swimTagKey, string(tag)) // insert SWIM tag.
 	}
 }
 
 // Init attaches to cluster.
 func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	if e.stop != nil {
+		return nil
+	}
+
 	// register SWIM tag.
 	if err = c.RegisterKey(e.swimTagKey, &SWIMTagValidator{}, true, 0); err != nil {
 		return err
@@ -108,7 +130,13 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 	// watch event to insert tags.
 	c.Watch(e.onClusterEvent)
 
+	e.stop = make(chan struct{})
+	e.cluster = c
+
 	return nil
+}
+
+func (e *EngineInstance) gossip(stop chan struct{}) {
 }
 
 // Close shutdown gossip engine instance.
@@ -145,8 +173,9 @@ func (s SWIMState) String() string {
 
 // SWIMTags represents node gossip tag.
 type SWIMTags struct {
-	Version uint32    `json:"v"`
-	State   SWIMState `json:"s"`
+	Version uint32    `json:"v,omitempty"`
+	State   SWIMState `json:"s,omitempty"`
+	Region  string    `json:"r,omitempty"`
 }
 
 // SWIMTagValidator validates SWIMTags.

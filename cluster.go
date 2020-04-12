@@ -13,6 +13,7 @@ var (
 // NodeNameResolver extracts node identifiers.
 type NodeNameResolver interface {
 	Name(*Node) ([]string, error)
+	Keys() []string
 }
 
 // EngineInstance is live instance of engine.
@@ -88,17 +89,21 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		eventHandlers: make(map[*ClusterEventContext]struct{}),
 		log:           logger,
 	}
+	c.self = newNode(c)
 
 	// init engine for cluster.
 	if err = engine.Init(c); err != nil {
 		return nil, nil, err
 	}
-	if self, err = c.NewNode(); err != nil {
+
+	if err = c.joinNode(c.self); err != nil {
+		if ierr := engine.Close(); ierr != nil {
+			panic(err)
+		}
 		return nil, nil, err
 	}
-	c.self = self
 
-	return
+	return c, c.self, nil
 }
 
 // Self returns self node.
@@ -223,21 +228,32 @@ func (c *Cluster) NewNode() (*Node, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	n := newNode(c)
+	return c.newNode()
+}
 
+func (c *Cluster) joinNode(n *Node) error {
 	c.emitEvent(EmptyNodeJoined, n)
 
 	names, err := c.resolver.Name(n)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(names) > 0 {
 		// has valid names. register to cluster.
 		c.registerNode(names, n)
+
 	} else {
 		c.emptyNodes[n] = struct{}{}
 	}
 
+	return nil
+}
+
+func (c *Cluster) newNode() (n *Node, err error) {
+	n = newNode(c)
+	if err = c.joinNode(n); err != nil {
+		return nil, err
+	}
 	return n, nil
 }
 
@@ -265,18 +281,20 @@ func (c *Cluster) Watch(handler ClusterEventHandler) *ClusterEventContext {
 
 func (c *Cluster) emitEvent(event Event, node *Node) {
 	// call handlers.
-	for ctx := range c.eventHandlers {
-		if ctx.unregistered {
-			delete(c.eventHandlers, ctx)
-			continue
-		}
+	go func() {
+		for ctx := range c.eventHandlers {
+			if ctx.unregistered {
+				delete(c.eventHandlers, ctx)
+				continue
+			}
 
-		ctx.handler(ctx, event, node)
+			ctx.handler(ctx, event, node)
 
-		if ctx.unregistered {
-			delete(c.eventHandlers, ctx)
+			if ctx.unregistered {
+				delete(c.eventHandlers, ctx)
+			}
 		}
-	}
+	}()
 }
 
 // RangeNodes iterate nodes.

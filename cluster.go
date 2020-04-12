@@ -6,8 +6,8 @@ import (
 )
 
 var (
-	ErrMissingNameResolver     = errors.New("missing node name resolver")
-	ErrIncompatibleCoordinator = errors.New("coordinator is not compatiable for existing data")
+	ErrMissingNameResolver   = errors.New("missing node name resolver")
+	ErrIncompatibleValidator = errors.New("validator is not compatiable for existing data")
 )
 
 // NodeNameResolver extracts node identifiers.
@@ -54,7 +54,7 @@ type Cluster struct {
 
 	resolver      NodeNameResolver
 	engine        EngineInstance
-	coordinators  map[string]KVCoordinator
+	validators    map[string]KVValidator
 	eventHandlers map[*ClusterEventContext]struct{}
 	nodes         map[string]*Node
 	emptyNodes    map[*Node]struct{}
@@ -62,6 +62,11 @@ type Cluster struct {
 
 	log Logger
 }
+
+const (
+	// LocalEntry will not be synced to remote.
+	LocalEntry = uint32(0x1)
+)
 
 // EngineOption contains engine-specific parameters.
 type EngineOption interface{}
@@ -77,7 +82,7 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 	c = &Cluster{
 		resolver:      resolver,
 		engine:        engine,
-		coordinators:  make(map[string]KVCoordinator),
+		validators:    make(map[string]KVValidator),
 		nodes:         make(map[string]*Node),
 		emptyNodes:    make(map[*Node]struct{}),
 		eventHandlers: make(map[*ClusterEventContext]struct{}),
@@ -114,9 +119,9 @@ func (c *Cluster) clearKey(key string) {
 	}
 }
 
-func (c *Cluster) replaceCoordinatorForce(key string, coordinator KVCoordinator) error {
+func (c *Cluster) replaceValidatorForce(key string, validator KVValidator) error {
 	// safety: we hold exclusive lock of cluster scope here. node cannot create new entry now.
-	// this keep coordinator of entry consistent.
+	// this keep validator of entry consistent.
 
 	nodeSet := make(map[*Node]struct{})
 	for _, node := range c.nodes {
@@ -124,16 +129,16 @@ func (c *Cluster) replaceCoordinatorForce(key string, coordinator KVCoordinator)
 			continue
 		}
 		nodeSet[node] = struct{}{}
-		node.replaceCoordinatorForce(key, coordinator)
+		node.replaceValidatorForce(key, validator)
 	}
 
 	return nil
 }
 
-func (c *Cluster) replaceCoordinator(key string, coordinator KVCoordinator, forceReplace bool) error {
+func (c *Cluster) replaceValidator(key string, validator KVValidator, forceReplace bool) error {
 
 	if forceReplace {
-		return c.replaceCoordinatorForce(key, coordinator)
+		return c.replaceValidatorForce(key, validator)
 	}
 
 	nodeSet := make(map[*Node]struct{})
@@ -147,14 +152,14 @@ func (c *Cluster) replaceCoordinator(key string, coordinator KVCoordinator, forc
 		defer node.lock.Unlock()
 	}
 
-	// ensure that existing value is valid for new coordinator.
+	// ensure that existing value is valid for new validator.
 	for node := range nodeSet {
 		entry := node.get(key)
 		if entry == nil {
 			continue
 		}
-		if !coordinator.Validate(entry.KeyValue) {
-			return ErrIncompatibleCoordinator
+		if !validator.Validate(entry.KeyValue) {
+			return ErrIncompatibleValidator
 		}
 	}
 
@@ -164,20 +169,20 @@ func (c *Cluster) replaceCoordinator(key string, coordinator KVCoordinator, forc
 		if entry == nil {
 			continue
 		}
-		entry.coordinator = coordinator
+		entry.validator = validator
 	}
 
 	return nil
 }
 
-// RegisterKey registers key-value coordinator with specific key.
-func (c *Cluster) RegisterKey(key string, coordinator KVCoordinator, forceReplace bool) error {
+// RegisterKey registers key-value validator with specific key.
+func (c *Cluster) RegisterKey(key string, validator KVValidator, forceReplace bool, flags uint32) error {
 	// lock entire cluster.
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	_, exists := c.coordinators[key]
-	if coordinator == nil {
+	_, exists := c.validators[key]
+	if validator == nil {
 		if !exists {
 			return nil
 		}
@@ -186,13 +191,13 @@ func (c *Cluster) RegisterKey(key string, coordinator KVCoordinator, forceReplac
 	}
 
 	if exists {
-		// replace coordinator.
-		if err := c.replaceCoordinator(key, coordinator, forceReplace); err != nil {
+		// replace validator.
+		if err := c.replaceValidator(key, validator, forceReplace); err != nil {
 			return err
 		}
 	}
 	// assign the new
-	c.coordinators[key] = coordinator
+	c.validators[key] = validator
 
 	return nil
 }

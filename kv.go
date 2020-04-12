@@ -4,8 +4,8 @@ import (
 	"sync"
 )
 
-// KVCoordinator guards consistency of KeyValue.
-type KVCoordinator interface {
+// KVValidator guards consistency of KeyValue.
+type KVValidator interface {
 
 	// Sync validates given KeyValue and update local key-value entry with it.
 	Sync(*KeyValueEntry, *KeyValue) (bool, error)
@@ -20,8 +20,10 @@ type KVCoordinator interface {
 type KeyValueEntry struct {
 	KeyValue
 
-	coordinator KVCoordinator
-	lock        sync.RWMutex
+	flags uint32
+
+	validator KVValidator
+	lock      sync.RWMutex
 }
 
 // KeyValue stores one metadata key of the node.

@@ -101,7 +101,7 @@ func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event 
 // Init attaches to cluster.
 func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 	// register SWIM tag.
-	if err = c.RegisterKey(e.swimTagKey, &SWIMTagValidator{}, true); err != nil {
+	if err = c.RegisterKey(e.swimTagKey, &SWIMTagValidator{}, true, 0); err != nil {
 		return err
 	}
 

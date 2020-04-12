@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	ErrCoordinatorMissing = errors.New("missing coordinator")
-	ErrInvalidKeyValue    = errors.New("invalid key value pair")
+	ErrValidatorMissing = errors.New("missing validator")
+	ErrInvalidKeyValue  = errors.New("invalid key value pair")
 )
 
 // Node represents members of cluster.
@@ -38,20 +38,20 @@ func (n *Node) Set(key, value string) error {
 	if !exists {
 		// new KV.
 		n.cluster.lock.RLock()
-		coordinator, exists := n.cluster.coordinators[key]
+		validator, exists := n.cluster.validators[key]
 		n.cluster.lock.RUnlock()
 
 		if !exists {
-			return ErrCoordinatorMissing
+			return ErrValidatorMissing
 		}
 		entry = &KeyValueEntry{
 			KeyValue: KeyValue{
 				Key:   key,
 				Value: value,
 			},
-			coordinator: coordinator,
+			validator: validator,
 		}
-		if !coordinator.Validate(entry.KeyValue) {
+		if !validator.Validate(entry.KeyValue) {
 			return ErrInvalidKeyValue
 		}
 		n.kvs[key] = entry
@@ -59,7 +59,7 @@ func (n *Node) Set(key, value string) error {
 	}
 
 	// modify existing entry.
-	if !entry.coordinator.Validate(KeyValue{
+	if !entry.validator.Validate(KeyValue{
 		Key:   key,
 		Value: value,
 	}) {
@@ -107,9 +107,9 @@ func (n *Node) synchrionizeFromProtobufSnapshot(message *proto.Node) {
 
 	existingKeySet := make(map[string]struct{}, len(message.Kvs))
 	var (
-		coordinator KVCoordinator
-		accepted    bool
-		err         error
+		validator KVValidator
+		accepted  bool
+		err       error
 	)
 
 	for _, msg := range message.Kvs {
@@ -117,23 +117,23 @@ func (n *Node) synchrionizeFromProtobufSnapshot(message *proto.Node) {
 
 		entry, exists := n.kvs[key]
 		if !exists { // new key-value
-			if coordinator, _ = n.cluster.coordinators[key]; coordinator == nil {
-				// not acceptable for missing coordinator.
-				n.cluster.log.Warnf("missing key-value coordinator for new entry {nodeID = %v, key = %v}", n.PrintableName(), key)
+			if validator, _ = n.cluster.validators[key]; validator == nil {
+				// not acceptable for missing validator.
+				n.cluster.log.Warnf("missing key-value validator for new entry {nodeID = %v, key = %v}", n.PrintableName(), key)
 			}
 			entry = &KeyValueEntry{
-				coordinator: coordinator,
+				validator: validator,
 				KeyValue: KeyValue{
 					Key: key,
 				},
 			}
 
 			// sync to storage entry.
-			if accepted, err = coordinator.Sync(entry, &KeyValue{
+			if accepted, err = validator.Sync(entry, &KeyValue{
 				Key:   key,
 				Value: msg.Value,
 			}); err != nil {
-				n.cluster.log.Fatal("[coordinator] ", err)
+				n.cluster.log.Fatal("[validator] ", err)
 				continue
 			}
 			if accepted {
@@ -143,13 +143,13 @@ func (n *Node) synchrionizeFromProtobufSnapshot(message *proto.Node) {
 
 		} else {
 			// existing one.
-			coordinator = entry.coordinator
+			validator = entry.validator
 			// sync to storage entry.
-			if accepted, err = coordinator.Sync(entry, &KeyValue{
+			if accepted, err = validator.Sync(entry, &KeyValue{
 				Key:   key,
 				Value: msg.Value,
 			}); err != nil {
-				n.cluster.log.Fatal("[coordinator] ", err)
+				n.cluster.log.Fatal("[validator] ", err)
 				continue
 			}
 		}
@@ -161,9 +161,9 @@ func (n *Node) synchrionizeFromProtobufSnapshot(message *proto.Node) {
 
 	// delete missing key.
 	for key, entry := range n.kvs {
-		entry.Key, coordinator = key, entry.coordinator
-		if accepted, err = coordinator.Sync(entry, nil); err != nil {
-			n.cluster.log.Fatal("[coordinator] ", err)
+		entry.Key, validator = key, entry.validator
+		if accepted, err = validator.Sync(entry, nil); err != nil {
+			n.cluster.log.Fatal("[validator] ", err)
 			continue
 		}
 		if accepted {
@@ -179,7 +179,7 @@ func (n *Node) get(key string) (entry *KeyValueEntry) {
 	return
 }
 
-func (n *Node) replaceCoordinatorForce(key string, coordinator KVCoordinator) {
+func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
@@ -188,12 +188,12 @@ func (n *Node) replaceCoordinatorForce(key string, coordinator KVCoordinator) {
 		return
 	}
 
-	// ensure that existing value is valid for new coordinator.
-	if !coordinator.Validate(entry.KeyValue) {
-		// drop entry in case of incompatiable coordinator.
+	// ensure that existing value is valid for new validator.
+	if !validator.Validate(entry.KeyValue) {
+		// drop entry in case of incompatiable validator.
 		delete(n.kvs, key)
 	} else {
-		entry.coordinator = coordinator // replace.
+		entry.validator = validator // replace.
 	}
 
 	return

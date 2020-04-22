@@ -53,13 +53,18 @@ func (c *ClusterEventContext) Unregister() { c.unregistered = true }
 type Cluster struct {
 	lock sync.RWMutex
 
-	resolver      NodeNameResolver
-	engine        EngineInstance
-	validators    map[string]KVValidator
-	eventHandlers map[*ClusterEventContext]struct{}
-	nodes         map[string]*Node
-	emptyNodes    map[*Node]struct{}
-	self          *Node
+	resolver   NodeNameResolver
+	engine     EngineInstance
+	validators map[string]KVValidator
+
+	eventHandlers             map[*ClusterEventContext]struct{}
+	keyEventWatcherIndex      map[string]map[*OperationContext]struct{}
+	nodeNameEventWatcherIndex map[string]map[*OperationContext]struct{}
+	nodeEventWatcherIndex     map[*Node]struct{}
+
+	nodes      map[string]*Node
+	emptyNodes map[*Node]struct{}
+	self       *Node
 
 	log Logger
 }
@@ -109,6 +114,18 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 // Self returns self node.
 func (c *Cluster) Self() *Node {
 	return c.self
+}
+
+func (c *Cluster) getNode(name string) *Node {
+	n, _ := c.nodes[name]
+	return n
+}
+
+// GetNode find node from name.
+func (c *Cluster) GetNode(name string) *Node {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.getNode(name)
 }
 
 func (c *Cluster) clearKey(key string) {
@@ -257,9 +274,14 @@ func (c *Cluster) newNode() (n *Node, err error) {
 	return n, nil
 }
 
-// Keys creates key context
-func (c *Cluster) Keys(keys ...string) *KeyContext {
-	return nil
+// Keys creates operation context
+func (c *Cluster) Keys(keys ...string) *OperationContext {
+	return (&OperationContext{cluster: c}).Keys(keys...)
+}
+
+// Nodes creates operation context
+func (c *Cluster) Nodes(nodes ...interface{}) *OperationContext {
+	return (&OperationContext{}).Nodes(nodes...)
 }
 
 // Watch registers event handler of cluster.

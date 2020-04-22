@@ -178,6 +178,28 @@ type SWIMTags struct {
 	Region  string    `json:"r,omitempty"`
 }
 
+// Encode serializes SWIMTags.
+func (t *SWIMTags) Encode() string {
+	raw, err := json.Marshal(t)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+// Decode deserializes SWIMTags.
+func (t *SWIMTags) Decode(v string) error {
+	return json.Unmarshal([]byte(v), t)
+}
+
+// SWIMTagTxn implements SWIM tag transaction.
+type SWIMTagTxn struct {
+	tag SWIMTags
+}
+
+// After returns modified value.
+func (t *SWIMTagTxn) After() (bool, string) { return false, t.tag.Encode() }
+
 // SWIMTagValidator validates SWIMTags.
 type SWIMTagValidator struct{}
 
@@ -198,6 +220,11 @@ func (c *SWIMTagValidator) Validate(kv sladder.KeyValue) bool {
 	return true
 }
 
-func (c *SWIMTagValidator) Txn() interface{} {
-	return nil
+// Txn begins an transaction.
+func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error) {
+	txn := &SWIMTagTxn{}
+	if err := txn.tag.Decode(x.Value); err != nil {
+		return nil, err
+	}
+	return txn, nil
 }

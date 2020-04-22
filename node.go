@@ -29,6 +29,11 @@ func newNode(cluster *Cluster) *Node {
 	}
 }
 
+// Keys selects keys.
+func (n *Node) Keys(keys ...string) *OperationContext {
+	return (&OperationContext{cluster: n.cluster}).Keys(keys...)
+}
+
 // Set sets KeyValue.
 func (n *Node) Set(key, value string) error {
 	n.lock.Lock()

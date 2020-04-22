@@ -14,9 +14,16 @@ type KVValidator interface {
 	Validate(KeyValue) bool
 
 	// Txn begins an transaction.
-	Txn() interface{}
+	Txn(KeyValue) (KVTransaction, error)
 }
 
+// KVTransaction implements atomic operation.
+type KVTransaction interface {
+	// After returns new value.
+	After() (bool, string)
+}
+
+// KeyValueEntry holds KeyValue.
 type KeyValueEntry struct {
 	KeyValue
 

@@ -212,16 +212,14 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 	return nil
 }
 
-// WatchEventHandler handles watch event.
-type WatchEventHandler func(*WatchEventContext, Event, *Node, string, ...string)
-
-// WatchEventContext contains watch event context.
-type WatchEventContext struct {
-	opCtx   *OperationContext
-	handler WatchEventHandler
-}
-
 // Watch watches changes.
 func (c *OperationContext) Watch(handler WatchEventHandler) *OperationContext {
+	if handler == nil {
+		// ignore dummy handler.
+		return c
+	}
+
+	c.cluster.eventRegistry.watchKV(c.clone(), handler)
+
 	return c
 }

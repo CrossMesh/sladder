@@ -27,28 +27,6 @@ type Engine interface {
 	New(...EngineOption) (EngineInstance, error)
 }
 
-// Event is enum type of event in cluster scope.
-type Event uint
-
-const (
-	// EmptyNodeJoined tiggered after an empty node(with no name) joins cluster.
-	EmptyNodeJoined = Event(1)
-	// NodeJoined tiggered after node name is resolved and the node joins cluster.
-	NodeJoined = Event(2)
-)
-
-// ClusterEventHandler receives events of cluster.
-type ClusterEventHandler func(*ClusterEventContext, Event, *Node)
-
-// ClusterEventContext refers to event handler.
-type ClusterEventContext struct {
-	handler      ClusterEventHandler
-	unregistered bool
-}
-
-// Unregister cancels event handler.
-func (c *ClusterEventContext) Unregister() { c.unregistered = true }
-
 // Cluster contains a set of node.
 type Cluster struct {
 	lock sync.RWMutex
@@ -57,10 +35,7 @@ type Cluster struct {
 	engine     EngineInstance
 	validators map[string]KVValidator
 
-	eventHandlers             map[*ClusterEventContext]struct{}
-	keyEventWatcherIndex      map[string]map[*OperationContext]struct{}
-	nodeNameEventWatcherIndex map[string]map[*OperationContext]struct{}
-	nodeEventWatcherIndex     map[*Node]struct{}
+	*eventRegistry
 
 	nodes      map[string]*Node
 	emptyNodes map[*Node]struct{}
@@ -91,7 +66,7 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		validators:    make(map[string]KVValidator),
 		nodes:         make(map[string]*Node),
 		emptyNodes:    make(map[*Node]struct{}),
-		eventHandlers: make(map[*ClusterEventContext]struct{}),
+		eventRegistry: newEventRegistry(),
 		log:           logger,
 	}
 	c.self = newNode(c)
@@ -282,41 +257,6 @@ func (c *Cluster) Keys(keys ...string) *OperationContext {
 // Nodes creates operation context
 func (c *Cluster) Nodes(nodes ...interface{}) *OperationContext {
 	return (&OperationContext{}).Nodes(nodes...)
-}
-
-// Watch registers event handler of cluster.
-func (c *Cluster) Watch(handler ClusterEventHandler) *ClusterEventContext {
-	if handler == nil {
-		return nil
-	}
-
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	ctx := &ClusterEventContext{
-		handler:      handler,
-		unregistered: false,
-	}
-	c.eventHandlers[ctx] = struct{}{}
-
-	return ctx
-}
-
-func (c *Cluster) emitEvent(event Event, node *Node) {
-	// call handlers.
-	go func() {
-		for ctx := range c.eventHandlers {
-			if ctx.unregistered {
-				delete(c.eventHandlers, ctx)
-				continue
-			}
-
-			ctx.handler(ctx, event, node)
-
-			if ctx.unregistered {
-				delete(c.eventHandlers, ctx)
-			}
-		}
-	}()
 }
 
 // RangeNodes iterate nodes.

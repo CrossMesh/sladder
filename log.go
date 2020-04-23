@@ -13,7 +13,8 @@ func (l *discardLogger) Warn(v ...interface{})                 {}
 func (l *discardLogger) Warnf(format string, v ...interface{}) {}
 
 var (
-	defaultLogger = &discardLogger{Logger: log.New(ioutil.Discard, "", 0)}
+	// DefaultLogger implements defaule logging behaviours.
+	DefaultLogger = &discardLogger{Logger: log.New(ioutil.Discard, "", 0)}
 )
 
 // Logger is logging abstraction.

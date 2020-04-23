@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	ErrInvalidTransactionHandler = errors.New("Invalid transaction handler")
+	ErrInvalidTransactionHandler = errors.New("invalid transaction handler")
 	ErrTooManyNodes              = errors.New("too many nodes selected")
 )
 
@@ -107,20 +107,20 @@ func (c *OperationContext) resolveNodes(maxNodes int) (nodes []*Node, err error)
 
 // Txn executes a transaction.
 func (c *OperationContext) Txn(proc interface{}) *OperationContext {
-	if len(c.keys) < 1 {
-		// ignore dummy txn.
-		return c
-	}
-
-	// lock cluster to prevent from node changing.
-	c.cluster.lock.RLock()
-	defer c.cluster.lock.RUnlock()
-
 	withError := func(err error) *OperationContext {
 		nc := c.clone()
 		nc.Error = ErrInvalidTransactionHandler
 		return nc
 	}
+
+	if len(c.keys) < 1 {
+		// ignore dummy txn.
+		return withError(nil)
+	}
+
+	// lock cluster to prevent from node changing.
+	c.cluster.lock.RLock()
+	defer c.cluster.lock.RUnlock()
 
 	// basic check proc type.
 	ty := reflect.TypeOf(proc)
@@ -137,7 +137,7 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 	}
 	if len(nodes) < 1 {
 		// ignore dummy txn.
-		return c
+		return withError(nil)
 	}
 	node := nodes[0]
 	node.lock.Lock()
@@ -184,9 +184,13 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 	txn := reflect.ValueOf(proc)
 	resultValues := txn.Call(callValues)
 
+	if err := resultValues[1].Interface().(error); err != nil {
+		// rollback for error.
+		return withError(err)
+	}
 	if rollback := !resultValues[0].Bool(); !rollback {
 		// rollback. write nothing.
-		return nil
+		return withError(nil)
 	}
 
 	// write values.
@@ -209,7 +213,7 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 		}
 	}
 
-	return nil
+	return withError(nil)
 }
 
 // Watch watches changes.

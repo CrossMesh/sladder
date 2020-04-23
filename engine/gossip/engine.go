@@ -1,8 +1,6 @@
 package gossip
 
 import (
-	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -17,16 +15,13 @@ type Transport interface {
 
 // engine options
 
-type minRegionPeer uint
-type region string
-type swimTagKey string
-type suspectTimeout time.Duration
-
 const (
 	defaultSuspectTimeout    = time.Minute * 5
 	defaultMinimumRegionPeer = 2
 	defaultSWIMTagKey        = "_swim_tag"
 )
+
+type minRegionPeer uint
 
 // WithMinRegionPeer creates option to limit minimum region peer.
 func WithMinRegionPeer(min uint) sladder.EngineOption {
@@ -36,14 +31,30 @@ func WithMinRegionPeer(min uint) sladder.EngineOption {
 	return min
 }
 
+type region string
+
 // WithRegion creates option of gossip region.
 func WithRegion(name string) sladder.EngineOption { return region(name) }
+
+type suspectTimeout time.Duration
 
 // WithSuspectTimeout creates option of suspection timeout.
 func WithSuspectTimeout(t time.Duration) sladder.EngineOption { return suspectTimeout(t) }
 
+type swimTagKey string
+
 // WithSWIMTagKey creates option of SWIM tag key.
 func WithSWIMTagKey(key string) sladder.EngineOption { return swimTagKey(key) }
+
+type logger sladder.Logger
+
+// WithLogger creates option of engine logger.
+func WithLogger(log sladder.Logger) sladder.EngineOption { return logger(log) }
+
+type fanout int32
+
+// WithFanout creates option of gossip fanout.
+func WithFanout(n int32) sladder.EngineOption { return fanout(n) }
 
 // Engine provides methods to create gossip engine instance.
 type Engine struct{}
@@ -64,6 +75,16 @@ func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladde
 			instance.SuspectTimeout = time.Duration(v)
 		case swimTagKey:
 			instance.swimTagKey = string(v)
+		case logger:
+			if v != nil {
+				instance.log = sladder.Logger(v)
+			}
+		case fanout:
+			fanout := int32(v)
+			if fanout < 1 {
+				fanout = 1
+			}
+			instance.Fanout = fanout
 		}
 	}
 	return instance
@@ -77,6 +98,7 @@ type EngineInstance struct {
 	swimTagKey     string
 	SuspectTimeout time.Duration
 	Region         string
+	Fanout         int32
 
 	lock       sync.Mutex
 	stop       chan struct{}
@@ -84,6 +106,8 @@ type EngineInstance struct {
 	withRegion map[string]map[*sladder.Node]struct{}
 
 	transport Transport
+
+	log sladder.Logger
 }
 
 func newInstanceDefault() *EngineInstance {
@@ -93,25 +117,41 @@ func newInstanceDefault() *EngineInstance {
 		term:           0,
 		withRegion:     make(map[string]map[*sladder.Node]struct{}),
 		swimTagKey:     defaultSWIMTagKey,
+		log:            sladder.DefaultLogger,
+		Fanout:         1,
 	}
+}
+
+func (e *EngineInstance) getGossipFanout() int32 {
+	fanout := e.Fanout
+	if fanout < 1 {
+		return 1
+	}
+	return fanout
 }
 
 func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event sladder.Event, node *sladder.Node) {
 	switch event {
 	case sladder.EmptyNodeJoined:
-		tag := ""
 		if e.cluster.Self() == node {
-			raw, err := json.Marshal(SWIMTags{
-				Region: e.Region,
-			})
-			if err != nil {
-				panic(fmt.Sprintf("cannot marshal SWIMTags: %v", err.Error()))
-			}
-			tag = string(raw)
+			e.onSelfSWIMTagMissing(node)
 		}
-		node.Set(e.swimTagKey, string(tag)) // insert SWIM tag.
 	}
 }
+
+func (e *EngineInstance) onSelfSWIMStateUpdated(ctx *sladder.WatchEventContext, meta sladder.KeyValueEventMetadata) {
+	switch meta.Event() {
+	case sladder.ValueChanged:
+		meta := meta.(sladder.KeyChangeEventMetadata)
+		e.onSelfSWIMStateChanged(meta.Node(), meta.Old(), meta.New())
+
+	case sladder.KeyDelete:
+		e.onSelfSWIMTagMissing(meta.Node())
+	}
+}
+
+// SWIMTagValidator creates new SWIM tag validator.
+func (e *EngineInstance) SWIMTagValidator() *SWIMTagValidator { return &SWIMTagValidator{engine: e} }
 
 // Init attaches to cluster.
 func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
@@ -127,8 +167,9 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 		return err
 	}
 
-	// watch event to insert tags.
+	// watch event to sync SWIM states.
 	c.Watch(e.onClusterEvent)
+	c.Keys(e.swimTagKey).Nodes(c.Self()).Watch(e.onSelfSWIMStateUpdated)
 
 	e.stop = make(chan struct{})
 	e.cluster = c
@@ -136,95 +177,7 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 	return nil
 }
 
-func (e *EngineInstance) gossip(stop chan struct{}) {
-}
-
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
 	return nil
-}
-
-const (
-	// ALIVE State.
-	ALIVE = SWIMState(0)
-	// SUSPECTED State.
-	SUSPECTED = SWIMState(1)
-	// DEAD State.
-	DEAD = SWIMState(2)
-)
-
-// SWIMState stores state of gossip node.
-type SWIMState uint8
-
-// SWIMStateNames contains printable name of SWIMState
-var SWIMStateNames = map[SWIMState]string{
-	ALIVE:     "alive",
-	SUSPECTED: "suspected",
-	DEAD:      "dead",
-}
-
-func (s SWIMState) String() string {
-	name, exist := SWIMStateNames[s]
-	if !exist {
-		return "undefined"
-	}
-	return name
-}
-
-// SWIMTags represents node gossip tag.
-type SWIMTags struct {
-	Version uint32    `json:"v,omitempty"`
-	State   SWIMState `json:"s,omitempty"`
-	Region  string    `json:"r,omitempty"`
-}
-
-// Encode serializes SWIMTags.
-func (t *SWIMTags) Encode() string {
-	raw, err := json.Marshal(t)
-	if err != nil {
-		panic(err)
-	}
-	return string(raw)
-}
-
-// Decode deserializes SWIMTags.
-func (t *SWIMTags) Decode(v string) error {
-	return json.Unmarshal([]byte(v), t)
-}
-
-// SWIMTagTxn implements SWIM tag transaction.
-type SWIMTagTxn struct {
-	tag SWIMTags
-}
-
-// After returns modified value.
-func (t *SWIMTagTxn) After() (bool, string) { return false, t.tag.Encode() }
-
-// SWIMTagValidator validates SWIMTags.
-type SWIMTagValidator struct{}
-
-// Sync synchronizes SWIMTag
-func (c *SWIMTagValidator) Sync(entry *sladder.KeyValueEntry, new *sladder.KeyValue) (bool, error) {
-	return false, nil
-}
-
-// Validate checks whether raw SWIMTags.
-func (c *SWIMTagValidator) Validate(kv sladder.KeyValue) bool {
-	if kv.Value == "" {
-		return true
-	}
-	tag := &SWIMTagValidator{}
-	if err := json.Unmarshal([]byte(kv.Value), tag); err != nil {
-		return false
-	}
-	return true
-}
-
-// Txn begins an transaction.
-func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error) {
-	txn := &SWIMTagTxn{}
-	if err := txn.tag.Decode(x.Value); err != nil {
-		return nil, err
-	}
-	return txn, nil
 }

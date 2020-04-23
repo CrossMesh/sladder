@@ -3,6 +3,8 @@ package sladder
 import (
 	"errors"
 	"sync"
+
+	"github.com/sunmxt/sladder/proto"
 )
 
 var (
@@ -58,7 +60,7 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		return nil, nil, ErrMissingNameResolver
 	}
 	if logger == nil {
-		logger = defaultLogger
+		logger = DefaultLogger
 	}
 	c = &Cluster{
 		resolver:      resolver,
@@ -84,6 +86,18 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 	}
 
 	return c, c.self, nil
+}
+
+// ProtobufSnapshot creates a snapshot of cluster in protobuf format.
+func (c *Cluster) ProtobufSnapshot() *proto.Cluster {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.protobufSnapshot()
+}
+
+func (c *Cluster) protobufSnapshot() *proto.Cluster {
+	return nil
 }
 
 // Self returns self node.

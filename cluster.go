@@ -14,7 +14,7 @@ var (
 
 // NodeNameResolver extracts node identifiers.
 type NodeNameResolver interface {
-	Name(*Node) ([]string, error)
+	Resolve(...*KeyValue) ([]string, error)
 	Keys() []string
 }
 
@@ -88,18 +88,6 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 	return c, c.self, nil
 }
 
-// ProtobufSnapshot creates a snapshot of cluster in protobuf format.
-func (c *Cluster) ProtobufSnapshot() *proto.Cluster {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-
-	return c.protobufSnapshot()
-}
-
-func (c *Cluster) protobufSnapshot() *proto.Cluster {
-	return nil
-}
-
 // Self returns self node.
 func (c *Cluster) Self() *Node {
 	return c.self
@@ -115,6 +103,35 @@ func (c *Cluster) GetNode(name string) *Node {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	return c.getNode(name)
+}
+
+// MostPossibleNode return the node whose names cover most of names in given set.
+func (c *Cluster) MostPossibleNode(names []string) *Node {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.mostPossibleNode(names)
+}
+
+func (c *Cluster) mostPossibleNode(names []string) (most *Node) {
+	if len(names) < 1 {
+		return nil
+	}
+
+	hits, max := make(map[*Node]uint), uint(0)
+	for _, name := range names {
+		node := c.getNode(name)
+		hit, exist := hits[node]
+		if !exist {
+			hit = 0
+		}
+		hits[node] = hit + 1
+		if hit >= max {
+			most = node
+			max = hit + 1
+		}
+	}
+	return
 }
 
 func (c *Cluster) clearKey(key string) {
@@ -240,7 +257,7 @@ func (c *Cluster) NewNode() (*Node, error) {
 func (c *Cluster) joinNode(n *Node) error {
 	c.emitEvent(EmptyNodeJoined, n)
 
-	names, err := c.resolver.Name(n)
+	names, err := c.resolver.Resolve(n.KeyValueEntries(false)...)
 	if err != nil {
 		return err
 	}
@@ -280,6 +297,10 @@ func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf bool) {
 	}
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+	c.rangeNodes(visit, excludeSelf)
+}
+
+func (c *Cluster) rangeNodes(visit func(*Node) bool, excludeSelf bool) {
 	nameSet := make(map[string]struct{}, len(c.nodes))
 	for name, node := range c.nodes {
 		if _, exist := nameSet[name]; exist {
@@ -294,6 +315,50 @@ func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf bool) {
 		}
 	}
 }
+
+// ProtobufSnapshot creates a snapshot of cluster in protobuf format.
+func (c *Cluster) ProtobufSnapshot(s *proto.Cluster) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	c.protobufSnapshot(s)
+}
+
+func (c *Cluster) protobufSnapshot(s *proto.Cluster) {
+	if s == nil {
+		s = &proto.Cluster{}
+	}
+
+	c.rangeNodes(func(n *Node) bool {
+		ns := &proto.Node{}
+		n.ProtobufSnapshot(ns)
+		s.Nodes = append(s.Nodes, ns)
+		return true
+	}, false)
+}
+
+//func (c *Cluster) rangeNodesStream(excludeSelf bool) <-chan *Node {
+//	ch := make(chan *Node)
+//
+//	go func() {
+//		ctx, cancelCtx := context.WithDeadline(context.TODO(), time.Now().Add(time.Minute))
+//
+//		defer close(ch)
+//		defer cancelCtx()
+//
+//		c.rangeNodes(func(node *Node) bool {
+//			select {
+//			case ch <- node:
+//			case <-ctx.Done():
+//				// take too much time to finish. may be freezing or deadlocked.
+//				c.log.Warn("rangeNodesStream deadline exceeded. terminate channel for safety. \n" + string(debug.Stack()))
+//				return false
+//			}
+//			return true
+//		}, excludeSelf)
+//	}()
+//	return ch
+//}
 
 // RemoveNode removes node from cluster.
 func (c *Cluster) RemoveNode(node *Node) (removed bool) {

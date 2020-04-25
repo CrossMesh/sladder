@@ -143,7 +143,13 @@ func (c *Cluster) clearKey(key string) {
 		}
 		nodeSet[node] = struct{}{}
 
-		delete(node.kvs, key)
+		node.lock.Lock()
+		entry, exist := node.kvs[key]
+		if exist {
+			delete(node.kvs, key)
+			c.emitKeyDeletion(node, entry.Key, entry.Value)
+		}
+		node.lock.Unlock()
 	}
 }
 

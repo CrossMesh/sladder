@@ -165,9 +165,37 @@ type keyDeleteEvent struct {
 func (e *keyDeleteEvent) Value() string { return e.value }
 func (e *keyDeleteEvent) Event() Event  { return KeyDelete }
 
-func (r *eventRegistry) emitKeyDeletion(meta KeyDeleteEventMetadata)  { r.emitKVEvent(meta) }
-func (r *eventRegistry) emitKeyInsertion(meta KeyInsertEventMetadata) { r.emitKVEvent(meta) }
-func (r *eventRegistry) emitKeyChange(meta KeyChangeEventMetadata)    { r.emitKVEvent(meta) }
+func (r *eventRegistry) emitKeyDeletion(node *Node, key, value string) {
+	r.emitKVEvent(&keyDeleteEvent{
+		keyValueEvent: keyValueEvent{
+			key:  key,
+			node: node,
+		},
+		value: value,
+	})
+}
+
+func (r *eventRegistry) emitKeyInsertion(node *Node, key, value string) {
+	r.emitKVEvent(&keyInsertEvent{
+		keyValueEvent: keyValueEvent{
+			key:  key,
+			node: node,
+		},
+		value: value,
+	})
+}
+
+func (r *eventRegistry) emitKeyChange(node *Node, key, origin, new string) {
+	r.emitKVEvent(&keyChangeEvent{
+		keyValueEvent: keyValueEvent{
+			key:  key,
+			node: node,
+		},
+		old: origin,
+		new: new,
+	})
+}
+
 func (r *eventRegistry) emitKVEvent(meta KeyValueEventMetadata) {
 	go func() {
 		r.lock.RLock()

@@ -76,6 +76,7 @@ func (n *Node) Set(key, value string) error {
 			return ErrInvalidKeyValue
 		}
 		n.kvs[key] = entry
+		n.cluster.emitKeyInsertion(n, entry.Key, entry.Value)
 		return nil
 	}
 
@@ -86,8 +87,10 @@ func (n *Node) Set(key, value string) error {
 	}) {
 		return ErrInvalidKeyValue
 	}
+	origin := entry.Value
 	entry.Value = value
 	entry.Key = key
+	n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value)
 
 	return nil
 }
@@ -139,6 +142,7 @@ func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
 	if !validator.Validate(entry.KeyValue) {
 		// drop entry in case of incompatiable validator.
 		delete(n.kvs, key)
+		n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
 	} else {
 		entry.validator = validator // replace.
 	}

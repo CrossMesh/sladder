@@ -107,11 +107,15 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 			if accepted = syncEntry(entry, msg); accepted {
 				// save accepted entry.
 				n.kvs[key] = entry
+				n.cluster.emitKeyInsertion(n, entry.Key, entry.Value)
 			}
 		} else {
 			// existing one.
 			// sync to storage entry.
-			accepted = syncEntry(entry, msg)
+			origin := entry.Value
+			if accepted = syncEntry(entry, msg); accepted {
+				n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value)
+			}
 		}
 		if accepted {
 			existingKeySet[key] = struct{}{}
@@ -122,6 +126,7 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 	for key, entry := range n.kvs {
 		if _, exist := existingKeySet[entry.Key]; !exist && syncEntry(entry, nil) {
 			delete(n.kvs, key)
+			n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
 		}
 	}
 }

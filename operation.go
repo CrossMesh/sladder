@@ -130,7 +130,7 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 		return withError(ErrInvalidTransactionHandler)
 	}
 
-	// defermine node.
+	// determine node.
 	nodes, err := c.resolveNodes(1)
 	if err != nil {
 		return withError(err)
@@ -196,12 +196,14 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 	// write values.
 	for idx, key := range c.keys {
 		txn := kvTxns[idx]
-		altered, newValue := txn.After()
+		updated, newValue := txn.After()
 		entry, exists := node.kvs[key]
 
-		if altered {
-			if exists && entry != nil {
+		if updated {
+			if exists && entry != nil { // updated
+				origin := entry.Value
 				entry.Value = newValue
+				node.cluster.emitKeyChange(node, entry.Key, origin, newValue)
 			} else {
 				node.kvs[key] = &KeyValueEntry{
 					KeyValue: KeyValue{
@@ -209,6 +211,7 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 						Value: newValue,
 					},
 				}
+				node.cluster.emitKeyInsertion(node, entry.Key, newValue)
 			}
 		}
 	}

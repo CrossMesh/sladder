@@ -1,6 +1,10 @@
 package sladder
 
-import "sync"
+import (
+	"sync"
+
+	arbit "github.com/sunmxt/arbiter"
+)
 
 // Event is enum type of event in cluster scope.
 type Event uint
@@ -42,6 +46,9 @@ type eventRegistry struct {
 	keyEventWatcherIndex      map[string]map[*WatchEventContext]struct{}
 	nodeNameEventWatcherIndex map[string]map[*WatchEventContext]struct{}
 	nodeEventWatcherIndex     map[*Node]map[*WatchEventContext]struct{}
+
+	// event work queue for seralization.
+	sigWork chan func()
 }
 
 func newEventRegistry() *eventRegistry {
@@ -50,11 +57,86 @@ func newEventRegistry() *eventRegistry {
 		keyEventWatcherIndex:      make(map[string]map[*WatchEventContext]struct{}),
 		nodeNameEventWatcherIndex: make(map[string]map[*WatchEventContext]struct{}),
 		nodeEventWatcherIndex:     make(map[*Node]map[*WatchEventContext]struct{}),
+		sigWork:                   make(chan func()),
 	}
 }
 
+func (r *eventRegistry) startWorker(arbiter *arbit.Arbiter) {
+	type eventWorkList struct {
+		work func()
+		next *eventWorkList
+	}
+	workChan := make(chan func())
+
+	var head, tail *eventWorkList
+	pool := sync.Pool{
+		New: func() interface{} { return &eventWorkList{} },
+	}
+
+	// schedule works.
+	arbiter.Go(func() {
+		var next func()
+
+		for {
+			if next != nil {
+				select {
+				case <-arbiter.Exit():
+					break
+				case ready := <-r.sigWork:
+					next = ready
+				}
+
+			} else {
+
+				select {
+				case <-arbiter.Exit():
+					break
+
+				case ready := <-r.sigWork:
+					// enqueue work.
+					if head == nil {
+						head = pool.Get().(*eventWorkList)
+						head.work = ready
+						tail = head
+					} else {
+						tail.next = pool.Get().(*eventWorkList)
+						tail = tail.next
+						tail.work = ready
+					}
+
+				case workChan <- next:
+					next = nil
+					// dequeue work.
+					if head != nil {
+						next = head.work
+						old := head
+						head = old.next
+						pool.Put(old)
+					}
+					if head == nil {
+						tail = nil
+					}
+				}
+			}
+		}
+	})
+
+	// worker
+	arbiter.Go(func() {
+		for {
+			select {
+			case <-arbiter.Exit():
+				break
+
+			case work := <-workChan:
+				work()
+			}
+		}
+	})
+}
+
 func (r *eventRegistry) emitEvent(event Event, node *Node) {
-	go func() {
+	r.sigWork <- func() {
 		// call handlers.
 		r.lock.Lock()
 		defer r.lock.Unlock()
@@ -71,7 +153,7 @@ func (r *eventRegistry) emitEvent(event Event, node *Node) {
 				delete(r.eventHandlers, ctx)
 			}
 		}
-	}()
+	}
 }
 
 // Watch registers event handler of cluster.
@@ -197,16 +279,17 @@ func (r *eventRegistry) emitKeyChange(node *Node, key, origin, new string) {
 }
 
 func (r *eventRegistry) emitKVEvent(meta KeyValueEventMetadata) {
-	go func() {
+	r.sigWork <- func() {
 		r.lock.RLock()
 		defer r.lock.RUnlock()
 		for watch := range r.hitWatchContext(meta.Node(), meta.Key()) {
 			watch.handler(watch, meta)
 		}
-	}()
+	}
 }
 
 func (r *eventRegistry) hitWatchContext(node *Node, targetKey string) map[*WatchEventContext]struct{} {
+
 	// pick by *Node
 	ctxSet, _ := r.nodeEventWatcherIndex[node]
 	emitCtxSet := make(map[*WatchEventContext]struct{}, len(ctxSet))
@@ -224,18 +307,28 @@ func (r *eventRegistry) hitWatchContext(node *Node, targetKey string) map[*Watch
 
 	// filter by keys.
 filterByKey:
-	for ctx := range ctxSet {
-		if targetKeys := ctx.opCtx.keys; len(targetKeys) > 0 {
+	for ctx := range emitCtxSet {
+		if targetKeys := ctx.opCtx.keys; len(targetKeys) > 0 { // has key limit.
 			for _, key := range ctx.opCtx.keys {
 				if key == targetKey { // hit.
 					continue filterByKey
 				}
 			}
-			delete(ctxSet, ctx)
+			delete(emitCtxSet, ctx)
 
 		} // else {
 		// 		no key filtering....
 		// }
+	}
+
+	// pick by key.
+	keyCtxSet, _ := r.keyEventWatcherIndex[targetKey]
+	for ctx := range keyCtxSet {
+		// We could just pick those who select the key but didn't select any node.
+		// Those who select node and key both are already in emit set.
+		if ctx.opCtx.nodes == nil && ctx.opCtx.nodeNames == nil {
+			emitCtxSet[ctx] = struct{}{}
+		}
 	}
 
 	return emitCtxSet

@@ -2,6 +2,7 @@ package gossip
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/sunmxt/sladder"
 )
@@ -35,9 +36,10 @@ func (s SWIMState) String() string {
 
 // SWIMTag represents node gossip tag.
 type SWIMTag struct {
-	Version uint32    `json:"v,omitempty"`
-	State   SWIMState `json:"s,omitempty"`
-	Region  string    `json:"r,omitempty"`
+	Version   uint32    `json:"v,omitempty"`
+	State     SWIMState `json:"s,omitempty"`
+	StateFrom uint64    `json:"f,omitempty"`
+	Region    string    `json:"r,omitempty"`
 }
 
 // Encode serializes SWIMTags.
@@ -92,11 +94,11 @@ func (c *SWIMTagValidator) Sync(entry *sladder.KeyValueEntry, remote *sladder.Ke
 	case remoteTag.State == SUSPECTED:
 		// SWIM rule 3: suspection can be raised by any cluster member.
 		if localTag.State == ALIVE {
-			localTag.State, changed = SUSPECTED, true
+			localTag.State, localTag.StateFrom, changed = SUSPECTED, remoteTag.StateFrom, true
 		}
 	case remoteTag.State == DEAD:
 		// SWIM rule 4: dead claim overwrites any state.
-		localTag.State, changed = DEAD, true
+		localTag.State, localTag.StateFrom, changed = DEAD, remoteTag.StateFrom, true
 	}
 
 	if changed {
@@ -126,6 +128,9 @@ func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error
 		return nil, err
 	}
 	txn.OldVersion = txn.tag.Version
+	if txn.tag.StateFrom < 1 {
+		txn.updateStateFrom()
+	}
 	return txn, nil
 }
 
@@ -139,12 +144,22 @@ type SWIMTagTxn struct {
 // After returns modified value.
 func (t *SWIMTagTxn) After() (bool, string) { return t.changed, t.tag.Encode() }
 
+func (t *SWIMTagTxn) updateStateFrom() {
+	if newStateFrom := uint64(time.Now().UnixNano()); newStateFrom > t.tag.StateFrom {
+		t.tag.StateFrom = newStateFrom
+	}
+}
+
+// Region returns region of tag snapshot
+func (t *SWIMTagTxn) Region() string { return t.tag.Region }
+
 // ClaimDead set SWIM state to dead.
 func (t *SWIMTagTxn) ClaimDead() bool {
 	if t.tag.State != DEAD {
 		// SWIM Rule: DEAD overwrites SUSPECTED and ALIVE.
 		t.changed = true
 		t.tag.State = DEAD
+		t.updateStateFrom()
 		return true
 	}
 	return false
@@ -160,6 +175,7 @@ func (t *SWIMTagTxn) ClaimSuspected() bool {
 		return false
 	}
 	t.tag.State, t.changed = SUSPECTED, true
+	t.updateStateFrom()
 	return true
 }
 
@@ -171,6 +187,7 @@ func (t *SWIMTagTxn) ClaimAlive() bool {
 			t.tag.Version++
 		}
 		t.tag.State, t.changed = ALIVE, true
+		t.updateStateFrom()
 		return true
 	}
 	return false
@@ -193,10 +210,8 @@ func (e *EngineInstance) onSelfSWIMTagMissing(self *sladder.Node) {
 	})
 }
 
-func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, originRaw, newRaw string) {
-	tag := &SWIMTag{}
-	err := tag.Decode(newRaw)
-	if err != nil || tag.State != ALIVE { // clear false postive.
+func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, old, new *SWIMTag) {
+	if new.State != ALIVE { // clear false postive.
 		self.Keys(e.swimTagKey).Txn(func(swim *SWIMTagTxn) (bool, error) {
 			return swim.ClaimAlive(), nil
 		})

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package pb;
+option go_package = "github.com/sunmxt/sladder/engine/gossip/pb";
+
+import "google/protobuf/any.proto";
+import "proto/core.proto";
+
+// GossipMessage is container of message body.
+message GossipMessage {
+    enum Type {
+        Ping = 0;
+        Ack = 1;
+        Sync = 2;
+        PingReq = 3;
+    }
+
+    Type type = 1;
+    google.protobuf.Any body = 2;
+}
+
+// Ping request.
+message Ping {
+    uint64 id = 1;
+}
+
+// Ping acknowledge
+message Ack {
+    uint64 id = 1;
+    repeated string names_proxy_for = 2;
+}
+
+// PingReq request.
+message PingReq {
+    uint64 id = 1;
+    repeated string name = 2;
+}
+
+// Cluster member synchronization.
+message Sync {
+    uint64 id = 1;
+    proto.Cluster cluster = 2;
+}

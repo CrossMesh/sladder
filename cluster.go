@@ -46,11 +46,6 @@ type Cluster struct {
 	log Logger
 }
 
-const (
-	// LocalEntry will not be synced to remote.
-	LocalEntry = uint32(0x1)
-)
-
 // EngineOption contains engine-specific parameters.
 type EngineOption interface{}
 
@@ -332,7 +327,11 @@ func (c *Cluster) ProtobufSnapshot(s *proto.Cluster) {
 
 func (c *Cluster) protobufSnapshot(s *proto.Cluster) {
 	if s == nil {
-		s = &proto.Cluster{}
+		return
+	}
+
+	if len(s.Nodes) > 0 {
+		s.Nodes = s.Nodes[0:0]
 	}
 
 	c.rangeNodes(func(n *Node) bool {
@@ -342,29 +341,6 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster) {
 		return true
 	}, false)
 }
-
-//func (c *Cluster) rangeNodesStream(excludeSelf bool) <-chan *Node {
-//	ch := make(chan *Node)
-//
-//	go func() {
-//		ctx, cancelCtx := context.WithDeadline(context.TODO(), time.Now().Add(time.Minute))
-//
-//		defer close(ch)
-//		defer cancelCtx()
-//
-//		c.rangeNodes(func(node *Node) bool {
-//			select {
-//			case ch <- node:
-//			case <-ctx.Done():
-//				// take too much time to finish. may be freezing or deadlocked.
-//				c.log.Warn("rangeNodesStream deadline exceeded. terminate channel for safety. \n" + string(debug.Stack()))
-//				return false
-//			}
-//			return true
-//		}, excludeSelf)
-//	}()
-//	return ch
-//}
 
 // RemoveNode removes node from cluster.
 func (c *Cluster) RemoveNode(node *Node) (removed bool) {

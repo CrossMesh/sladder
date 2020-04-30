@@ -33,6 +33,11 @@ type KeyValueEntry struct {
 	lock      sync.RWMutex
 }
 
+const (
+	// LocalEntry will not be synced to remote.
+	LocalEntry = uint32(0x1)
+)
+
 // KeyValue stores one metadata key of the node.
 type KeyValue struct {
 	Key   string

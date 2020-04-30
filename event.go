@@ -17,13 +17,15 @@ const (
 	EmptyNodeJoined = Event(1)
 	// NodeJoined tiggered after node name is resolved and the node joined cluster.
 	NodeJoined = Event(2)
+	// NodeRemoved tiggered after a node is removed from cluster.
+	NodeRemoved = Event(3)
 
 	// ValueChanged tiggered after a KeyValue value changed.
-	ValueChanged = Event(3)
+	ValueChanged = Event(4)
 	// KeyDelete tiggered after a KeyValue was removed from a node.
-	KeyDelete = Event(4)
+	KeyDelete = Event(5)
 	// KeyInsert tiggered after a KeyValue was inserted to a node.
-	KeyInsert = Event(5)
+	KeyInsert = Event(6)
 )
 
 // ClusterEventHandler receives events of cluster.

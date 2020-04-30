@@ -1,6 +1,6 @@
 .PHONY: test exec cover devtools env cloc proto
 
-GOMOD:=git.uestc.cn/sunmxt/sladder
+GOMOD:=github.com/sunmxt/sladder
 
 PROJECT_ROOT:=$(shell pwd)
 BUILD_DIR:=build
@@ -16,6 +16,15 @@ all: test
 $(COVERAGE_DIR):
 	mkdir -p $(COVERAGE_DIR)
 
+bin: 
+	mkdir bin
+
+build/bin: bin build
+	test -d build/bin || ln -s $$(pwd)/bin build/bin
+
+build:
+	mkdir build
+
 cover: coverage test
 	go tool cover -html=$(COVERAGE_DIR)/coverage.out -o $(COVERAGE_DIR)/coverage.html
 
@@ -23,11 +32,6 @@ test: coverage
 	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -cover ./...
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
-build:
-	mkdir build
-
-$(GOPATH)/bin:
-	test -d "$(GOPATH)/bin" || make "$(GOPATH)/bin"
 
 env:
 	@echo "export PROJECT_ROOT=\"$(PROJECT_ROOT)\""
@@ -37,19 +41,22 @@ cloc:
 	cloc . --exclude-dir=build,bin,ci,mocks
 
 proto: $(GOPATH)/bin/protoc-gen-go
-	protoc -I=$(PROJECT_ROOT) --go_out=$(PROJECT_ROOT) proto/core.proto
-	find -E . -name '*.pb.go' -type f -not -path './build/*' | xargs sed -i '' "s|\"proto\"|\"$(GOMOD)/proto\"|g"
+	protoc -I=$(PROJECT_ROOT) --go_out=module=$(GOMOD):. proto/core.proto
+	protoc -I=$(PROJECT_ROOT) --go_out=module=$(GOMOD):. engine/gossip/pb/pb.proto
+	find -E . -name '*.pb.go' -type f -not -path './build/*' | xargs sed -i '' " \
+		s|\"proto\"|\"$(GOMOD)/proto\"|g; \
+		s|\"engine/gossip/pb\"|\"$(GOMOD)/engine/gossip/pb\"|g"
 
-devtools: $(GOPATH)/bin/gopls $(GOPATH)/bin/goimports
+devtools: bin/gopls bin/goimports bin/protoc-gen-go
 
 exec:
 	$(CMD)
 
-$(GOPATH)/bin/protoc-gen-go: $(GOPATH)/bin
+bin/protoc-gen-go: build/bin
 	go get -u github.com/golang/protobuf/protoc-gen-go
 
-$(GOPATH)/bin/gopls: $(GOPATH)/bin
+bin/gopls: build/bin
 	go get -u golang.org/x/tools/gopls
 
-$(GOPATH)/bin/goimports: $(GOPATH)/bin
+bin/goimports: build/bin
 	go get -u golang.org/x/tools/cmd/goimports

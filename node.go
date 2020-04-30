@@ -29,6 +29,16 @@ func newNode(cluster *Cluster) *Node {
 	}
 }
 
+// Names returns name set.
+func (n *Node) Names() (names []string) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	names = make([]string, len(n.names))
+	copy(names, n.names)
+	return
+}
+
 // Keys selects keys.
 func (n *Node) Keys(keys ...string) *OperationContext {
 	return (&OperationContext{cluster: n.cluster}).Keys(keys...)
@@ -99,6 +109,9 @@ func (n *Node) protobufSnapshot(message *proto.Node) {
 	message.Kvs = make([]*proto.Node_KeyValue, 0, len(n.kvs))
 	for key, entry := range n.kvs {
 		entry.Key = key
+		if entry.flags&LocalEntry != 0 { // local entry.
+			continue
+		}
 		message.Kvs = append(message.Kvs, &proto.Node_KeyValue{
 			Key:   entry.Key,
 			Value: entry.Value,

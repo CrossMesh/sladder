@@ -266,6 +266,23 @@ func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event 
 		if e.cluster.Self() == node {
 			e.onSelfSWIMTagMissing(node)
 		}
+
+	case sladder.NodeRemoved:
+		e.onNodeRemovedClearFailureDetector(node)
+		e.onNodeRemoved(node)
+	}
+}
+
+func (e *EngineInstance) onNodeRemoved(node *sladder.Node) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	if err := node.Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
+		e.removeFromRegion(tag.Region(), node, -1)
+		return false, nil
+	}).Error; err != nil {
+		e.log.Fatal("cannot start txn when remove node from region map, got " + err.Error())
+		return
 	}
 }
 

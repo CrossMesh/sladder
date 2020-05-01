@@ -353,11 +353,12 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool) {
 	// remove from empty node set.
 	if _, exists := c.emptyNodes[node]; exists {
 		delete(c.emptyNodes, node)
+		c.emitEvent(NodeRemoved, node)
 		return true
 	}
 
 	// remove from node set.
-	var lastNode *Node
+	lastNode := node
 	for _, name := range node.names {
 		if expected, exists := c.nodes[name]; !exists {
 			continue
@@ -372,6 +373,10 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool) {
 			lastNode = expected
 			removed = true
 		}
+	}
+
+	if removed {
+		c.emitEvent(NodeRemoved, node)
 	}
 
 	return

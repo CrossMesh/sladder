@@ -56,6 +56,18 @@ func (e *EngineInstance) goDetectFailure() {
 	})
 }
 
+func (e *EngineInstance) onNodeRemovedClearFailureDetector(node *sladder.Node) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	// remove node from all failure detector fields.
+	delete(e.inPing, node)
+	delete(e.roundTrips, node)
+	if s, _ := e.suspectionNodeIndex[node]; s != nil {
+		heap.Remove(&e.suspectionQueue, s.queueIndex)
+	}
+}
+
 func (e *EngineInstance) clearDeads() {
 	e.lock.Lock()
 	defer e.lock.Unlock()

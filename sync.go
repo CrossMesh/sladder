@@ -41,7 +41,7 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) []
 }
 
 // SyncFromProtobufSnapshot sync cluster states by refering to protobuf snapshot.
-func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool) {
+func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, validate func(*Node, []*proto.Node_KeyValue) bool) {
 	if s == nil {
 		return
 	}
@@ -50,6 +50,9 @@ func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool) {
 	for _, msg := range s.Nodes {
 		names := c.resolveNodeNameFromProtobuf(msg.Kvs)
 		node := c.mostPossibleNode(names)
+		if validate != nil && !validate(node, msg.Kvs) {
+			continue
+		}
 		if node == nil {
 			if !autoNewNode {
 				continue

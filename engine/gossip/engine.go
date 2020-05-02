@@ -106,6 +106,13 @@ func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladde
 	return instance
 }
 
+// EngineStatistics collects gossip engine statistics.
+type EngineStatistics struct {
+	FinishedSync uint64
+	TimeoutSyncs uint64
+	InSync       uint64
+}
+
 // EngineInstance is live gossip engine instance.
 type EngineInstance struct {
 	// parameters fields.
@@ -126,7 +133,8 @@ type EngineInstance struct {
 	withRegion map[string]map[*sladder.Node]struct{}
 
 	// sync fields.
-	inSync map[uint64]struct{}
+	inSync       map[uint64]struct{}
+	leavingNodes map[*sladder.Node]struct{} // leaving nodes.
 
 	// failure detector fields
 	inPing              map[*sladder.Node]*pingContext  // nodes in ping progress
@@ -135,6 +143,8 @@ type EngineInstance struct {
 	pingReqTimeoutEvent chan *sladder.Node              // ping-req timeout event.
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
 	suspectionQueue     suspectionQueue                 // heap order by by suspection.notAfter.
+
+	statistics EngineStatistics
 }
 
 func newInstanceDefault() *EngineInstance {
@@ -346,6 +356,7 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 			e.log.Fatal("cannot decode inserted swim tag, got " + err.Error())
 			break
 		}
+
 		e.insertRegion(meta.Node(), tag)
 
 	case sladder.ValueChanged:
@@ -359,10 +370,14 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 			e.log.Fatal("cannot decode new swim tag, got " + err.Error())
 			break
 		}
+
 		if meta.Node() == e.cluster.Self() {
 			e.onSelfSWIMStateChanged(meta.Node(), old, new)
+		} else {
+			e.traceSuspections(meta.Node(), new)
+			e.removeIfDead(meta.Node(), new)
+			e.removeIfLeft(meta.Node(), new)
 		}
-		e.updateSuspections(meta.Node(), old, new)
 		e.updateRegionFromTag(meta.Node(), old, new)
 
 	case sladder.KeyDelete:
@@ -371,6 +386,7 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 			e.log.Fatal("cannot decode deleted swim tag, got " + err.Error())
 			break
 		}
+
 		if meta.Node() == e.cluster.Self() {
 			e.onSelfSWIMTagMissing(meta.Node())
 		}
@@ -410,5 +426,22 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
+	e.cluster.Self().Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
+		tag.Leave()
+		return true, nil
+	})
+
+	waitTerm, lastSucceededTerm := 10, e.statistics.FinishedSync-e.statistics.TimeoutSyncs
+	e.tickGossipPeriodGo(func(deadline time.Time) {
+		if waitTerm > 1 {
+			waitTerm--
+			return
+		} else if newSucceededTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs; newSucceededTerm-lastSucceededTerm < 3 {
+			return
+		}
+		e.arbiter.Shutdown()
+	})
+
+	e.arbiter.Join()
 	return nil
 }

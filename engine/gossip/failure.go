@@ -52,7 +52,7 @@ func (e *EngineInstance) goDetectFailure() {
 	})
 
 	e.tickGossipPeriodGo(func(deadline time.Time) {
-		e.clearDeads()
+		e.clearSuspections()
 	})
 }
 
@@ -68,7 +68,75 @@ func (e *EngineInstance) onNodeRemovedClearFailureDetector(node *sladder.Node) {
 	}
 }
 
-func (e *EngineInstance) clearDeads() {
+func (e *EngineInstance) traceSuspections(node *sladder.Node, tag *SWIMTag) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	// trace suspection states.
+	s, suspected := e.suspectionNodeIndex[node]
+	if tag.State != SUSPECTED {
+		if suspected {
+			heap.Remove(&e.suspectionQueue, s.queueIndex)
+			delete(e.suspectionNodeIndex, node)
+		}
+	} else if !suspected {
+		s = &suspection{
+			notAfter: time.Now().Add(e.getGossipPeriod() * 10),
+			node:     node,
+		}
+		heap.Push(&e.suspectionQueue, s)
+		e.suspectionNodeIndex[node] = s
+	}
+}
+
+func (e *EngineInstance) gossipForLeaving(node *sladder.Node) {
+	e.leavingNodes[node] = struct{}{}
+	time.AfterFunc(e.getGossipPeriod()*10, func() {
+		delete(e.leavingNodes, node)
+	})
+}
+
+func (e *EngineInstance) removeIfDead(node *sladder.Node, tag *SWIMTag) {
+	if tag.State != DEAD {
+		return
+	}
+
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	nodeSet, exists := e.withRegion[tag.Region]
+	if !exists {
+		// should not reach this.
+		e.log.Fatal("[BUGS] a node not traced by region map.")
+		e.cluster.RemoveNode(node)
+		e.gossipForLeaving(node)
+	}
+	if _, inNodeSet := nodeSet[node]; !inNodeSet {
+		// should not reach this.
+		e.log.Fatal("[BUGS] a node not in region node set.")
+		e.cluster.RemoveNode(node)
+		e.gossipForLeaving(node)
+	}
+	if uint(len(nodeSet)) <= e.minRegionPeer { // limitation of region peer count.
+		return
+	}
+	e.cluster.RemoveNode(node)
+	e.gossipForLeaving(node)
+}
+
+func (e *EngineInstance) removeIfLeft(node *sladder.Node, tag *SWIMTag) {
+	if tag.State != LEFT {
+		return
+	}
+
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	e.cluster.RemoveNode(node)
+	e.gossipForLeaving(node)
+}
+
+func (e *EngineInstance) clearSuspections() {
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
@@ -96,31 +164,6 @@ func (e *EngineInstance) clearDeads() {
 		deads = append(deads, s.node)
 		heap.Pop(&e.suspectionQueue)
 	}
-
-	// remove dead nodes.
-	for _, node := range deads {
-		region := ""
-		node.Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
-			region = tag.Region()
-			return false, nil
-		})
-		nodeSet, exists := e.withRegion[region]
-		if !exists {
-			// should not reach this.
-			e.log.Fatal("[BUGS] a node not traced by region map.")
-			e.cluster.RemoveNode(node)
-			continue
-		}
-		if _, inNodeSet := nodeSet[node]; !inNodeSet {
-			// should not reach this.
-			e.log.Fatal("[BUGS] a node not in region map.")
-			e.cluster.RemoveNode(node)
-		}
-		if uint(len(nodeSet)) <= e.minRegionPeer { // limitation of region peer count.
-			continue
-		}
-		e.cluster.RemoveNode(node)
-	}
 }
 
 func (e *EngineInstance) detectFailure() {
@@ -143,24 +186,6 @@ func (e *EngineInstance) estimatedRoundTrip(node *sladder.Node) time.Duration {
 		return e.getGossipPeriod()
 	}
 	return rtt
-}
-
-func (e *EngineInstance) updateSuspections(node *sladder.Node, old, new *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-
-	s, exists := e.suspectionNodeIndex[node]
-	if new.State == SUSPECTED && !exists {
-		s = &suspection{
-			notAfter: time.Unix(0, int64(new.StateFrom)).Add(e.getGossipPeriod() * 10),
-			node:     node,
-		}
-		heap.Push(&e.suspectionQueue, s)
-
-	} else if exists {
-		heap.Remove(&e.suspectionQueue, s.queueIndex)
-		delete(e.suspectionNodeIndex, node)
-	}
 }
 
 func (e *EngineInstance) processFailureDetectionProto(from []string, msg *pb.GossipMessage) {

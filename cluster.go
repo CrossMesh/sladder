@@ -318,14 +318,14 @@ func (c *Cluster) rangeNodes(visit func(*Node) bool, excludeSelf bool) {
 }
 
 // ProtobufSnapshot creates a snapshot of cluster in protobuf format.
-func (c *Cluster) ProtobufSnapshot(s *proto.Cluster) {
+func (c *Cluster) ProtobufSnapshot(s *proto.Cluster, validate func(*Node) bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	c.protobufSnapshot(s)
+	c.protobufSnapshot(s, validate)
 }
 
-func (c *Cluster) protobufSnapshot(s *proto.Cluster) {
+func (c *Cluster) protobufSnapshot(s *proto.Cluster, validate func(*Node) bool) {
 	if s == nil {
 		return
 	}
@@ -335,6 +335,9 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster) {
 	}
 
 	c.rangeNodes(func(n *Node) bool {
+		if !validate(n) {
+			return true
+		}
 		ns := &proto.Node{}
 		n.ProtobufSnapshot(ns)
 		s.Nodes = append(s.Nodes, ns)
@@ -384,5 +387,5 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool) {
 
 // Quit sends "leave" message to cluster and shops member sync.
 func (c *Cluster) Quit() error {
-	return nil
+	return c.engine.Close()
 }

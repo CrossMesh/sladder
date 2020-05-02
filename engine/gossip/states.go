@@ -2,7 +2,6 @@ package gossip
 
 import (
 	"encoding/json"
-	"time"
 
 	"github.com/sunmxt/sladder"
 )
@@ -14,6 +13,8 @@ const (
 	SUSPECTED = SWIMState(1)
 	// DEAD State.
 	DEAD = SWIMState(2)
+	// LEFT State.
+	LEFT = SWIMState(3)
 )
 
 // SWIMState stores state of gossip node.
@@ -24,6 +25,7 @@ var SWIMStateNames = map[SWIMState]string{
 	ALIVE:     "alive",
 	SUSPECTED: "suspected",
 	DEAD:      "dead",
+	LEFT:      "LEFT",
 }
 
 func (s SWIMState) String() string {
@@ -36,10 +38,9 @@ func (s SWIMState) String() string {
 
 // SWIMTag represents node gossip tag.
 type SWIMTag struct {
-	Version   uint32    `json:"v,omitempty"`
-	State     SWIMState `json:"s,omitempty"`
-	StateFrom uint64    `json:"f,omitempty"`
-	Region    string    `json:"r,omitempty"`
+	Version uint32    `json:"v,omitempty"`
+	State   SWIMState `json:"s,omitempty"`
+	Region  string    `json:"r,omitempty"`
 }
 
 // Encode serializes SWIMTags.
@@ -92,13 +93,20 @@ func (c *SWIMTagValidator) Sync(entry *sladder.KeyValueEntry, remote *sladder.Ke
 	changed := false
 	switch {
 	case remoteTag.State == SUSPECTED:
-		// SWIM rule 3: suspection can be raised by any cluster member.
+		// SWIM rule 3: suspection can be raised by any cluster member, overwriting ALIVE.
 		if localTag.State == ALIVE {
-			localTag.State, localTag.StateFrom, changed = SUSPECTED, remoteTag.StateFrom, true
+			localTag.State, changed = SUSPECTED, true
 		}
+
 	case remoteTag.State == DEAD:
-		// SWIM rule 4: dead claim overwrites any state.
-		localTag.State, localTag.StateFrom, changed = DEAD, remoteTag.StateFrom, true
+		// SWIM rule 4: dead claim overwrites ALIVE, SUSPECTED.
+		if localTag.State != LEFT {
+			localTag.State, changed = DEAD, true
+		}
+
+	case remoteTag.State == LEFT:
+		// extended SWIM Rule: LEFT overwrites any.
+		localTag.State, changed = LEFT, true
 	}
 
 	if changed {
@@ -128,9 +136,6 @@ func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error
 		return nil, err
 	}
 	txn.OldVersion = txn.tag.Version
-	if txn.tag.StateFrom < 1 {
-		txn.updateStateFrom()
-	}
 	return txn, nil
 }
 
@@ -144,22 +149,22 @@ type SWIMTagTxn struct {
 // After returns modified value.
 func (t *SWIMTagTxn) After() (bool, string) { return t.changed, t.tag.Encode() }
 
-func (t *SWIMTagTxn) updateStateFrom() {
-	if newStateFrom := uint64(time.Now().UnixNano()); newStateFrom > t.tag.StateFrom {
-		t.tag.StateFrom = newStateFrom
-	}
-}
-
 // Region returns region of tag snapshot
 func (t *SWIMTagTxn) Region() string { return t.tag.Region }
 
+// State returns current SWIM state.
+func (t *SWIMTagTxn) State() SWIMState { return t.tag.State }
+
 // ClaimDead set SWIM state to dead.
 func (t *SWIMTagTxn) ClaimDead() bool {
+	if t.tag.State == LEFT {
+		// extended SWIM Rule: LEFT overwrites any.
+		return false
+	}
 	if t.tag.State != DEAD {
 		// SWIM Rule: DEAD overwrites SUSPECTED and ALIVE.
 		t.changed = true
 		t.tag.State = DEAD
-		t.updateStateFrom()
 		return true
 	}
 	return false
@@ -171,11 +176,14 @@ func (t *SWIMTagTxn) ClaimSuspected() bool {
 		// SWIM Rule: DEAD overwrites SUSPECTED.
 		return false
 	}
+	if t.tag.State == LEFT {
+		// extended SWIM Rule: LEFT overwrites any.
+		return false
+	}
 	if t.tag.State == SUSPECTED {
 		return false
 	}
 	t.tag.State, t.changed = SUSPECTED, true
-	t.updateStateFrom()
 	return true
 }
 
@@ -187,10 +195,18 @@ func (t *SWIMTagTxn) ClaimAlive() bool {
 			t.tag.Version++
 		}
 		t.tag.State, t.changed = ALIVE, true
-		t.updateStateFrom()
 		return true
 	}
 	return false
+}
+
+// Leave set states to LEFT.
+func (t *SWIMTagTxn) Leave() bool {
+	if t.tag.State == LEFT {
+		return true
+	}
+	t.tag.State, t.changed = LEFT, true
+	return true
 }
 
 // SetRegion updates region.

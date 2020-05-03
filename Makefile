@@ -1,4 +1,4 @@
-.PHONY: test exec cover devtools env cloc proto
+.PHONY: test exec cover devtools env cloc proto mock
 
 GOMOD:=github.com/sunmxt/sladder
 
@@ -29,13 +29,14 @@ cover: coverage test
 	go tool cover -html=$(COVERAGE_DIR)/coverage.out -o $(COVERAGE_DIR)/coverage.html
 
 test: coverage
-	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -cover ./...
+	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -cover ./ ./engine/...
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 
 env:
 	@echo "export PROJECT_ROOT=\"$(PROJECT_ROOT)\""
 	@echo "export GOPATH=\"\$${PROJECT_ROOT}/build\""
+	@echo "export PATH=\"\$${PROJECT_ROOT}/bin:$${PATH}\""
 
 cloc:
 	cloc . --exclude-dir=build,bin,ci,mocks
@@ -47,7 +48,12 @@ proto: $(GOPATH)/bin/protoc-gen-go
 		s|\"proto\"|\"$(GOMOD)/proto\"|g; \
 		s|\"engine/gossip/pb\"|\"$(GOMOD)/engine/gossip/pb\"|g"
 
-devtools: bin/gopls bin/goimports bin/protoc-gen-go
+devtools: bin/gopls bin/goimports bin/protoc-gen-go bin/mockery
+
+mock: bin/mockery
+	bin/mockery -inpkg -name EngineInstance -case underscore
+	bin/mockery -inpkg -name Engine -case underscore
+	bin/mockery -inpkg -name NodeNameResolver -case underscore
 
 exec:
 	$(CMD)
@@ -60,3 +66,6 @@ bin/gopls: build/bin
 
 bin/goimports: build/bin
 	go get -u golang.org/x/tools/cmd/goimports
+
+bin/mockery:
+	go get -u github.com/vektra/mockery/cmd/mockery

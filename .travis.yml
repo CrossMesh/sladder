@@ -1,0 +1,12 @@
+language: go
+
+go:
+- "1.13"
+
+stages:
+  - test
+
+jobs:
+  include:
+  - stage: test
+    script: make test

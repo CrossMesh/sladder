@@ -79,11 +79,12 @@ func (r *eventRegistry) startWorker(arbiter *arbit.Arbiter) {
 	arbiter.Go(func() {
 		var next func()
 
+	Schedule:
 		for {
-			if next != nil {
+			if next == nil {
 				select {
 				case <-arbiter.Exit():
-					break
+					break Schedule
 				case ready := <-r.sigWork:
 					next = ready
 				}
@@ -92,7 +93,7 @@ func (r *eventRegistry) startWorker(arbiter *arbit.Arbiter) {
 
 				select {
 				case <-arbiter.Exit():
-					break
+					break Schedule
 
 				case ready := <-r.sigWork:
 					// enqueue work.
@@ -125,10 +126,11 @@ func (r *eventRegistry) startWorker(arbiter *arbit.Arbiter) {
 
 	// worker
 	arbiter.Go(func() {
+	Work:
 		for {
 			select {
 			case <-arbiter.Exit():
-				break
+				break Work
 
 			case work := <-workChan:
 				work()

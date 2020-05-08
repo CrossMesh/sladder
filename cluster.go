@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 
+	arbit "github.com/sunmxt/arbiter"
 	"github.com/sunmxt/sladder/proto"
 )
 
@@ -43,6 +44,8 @@ type Cluster struct {
 	emptyNodes map[*Node]struct{}
 	self       *Node
 
+	arbiter *arbit.Arbiter
+
 	log Logger
 }
 
@@ -64,6 +67,7 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		nodes:         make(map[string]*Node),
 		emptyNodes:    make(map[*Node]struct{}),
 		eventRegistry: newEventRegistry(),
+		arbiter:       arbit.New(),
 		log:           logger,
 	}
 	c.self = newNode(c)
@@ -73,10 +77,15 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		return nil, nil, err
 	}
 
+	c.startWorker(c.arbiter)
+	go func() { c.arbiter.Join() }()
+
 	if err = c.joinNode(c.self); err != nil {
 		if ierr := engine.Close(); ierr != nil {
 			panic(err)
 		}
+		c.arbiter.Shutdown()
+		c.arbiter.Join()
 		return nil, nil, err
 	}
 
@@ -120,10 +129,10 @@ func (c *Cluster) mostPossibleNode(names []string) (most *Node) {
 		if !exist {
 			hit = 0
 		}
-		hits[node] = hit + 1
-		if hit >= max {
-			most = node
-			max = hit + 1
+		hit++
+		hits[node] = hit
+		if hit > max {
+			most, max = node, hit
 		}
 	}
 	return
@@ -165,28 +174,26 @@ func (c *Cluster) replaceValidatorForce(key string, validator KVValidator) error
 }
 
 func (c *Cluster) replaceValidator(key string, validator KVValidator, forceReplace bool) error {
-
 	if forceReplace {
 		return c.replaceValidatorForce(key, validator)
 	}
 
 	nodeSet := make(map[*Node]struct{})
-	// all nodes should be locked to prevent from entry changing.
-	for _, node := range c.nodes {
-		if _, exists := nodeSet[node]; exists {
-			continue
-		}
+	c.rangeNodes(func(node *Node) bool {
 		nodeSet[node] = struct{}{}
+		return true
+	}, false, false)
+
+	for node := range nodeSet {
+		// all nodes should be locked to prevent from entry changing.
 		node.lock.Lock()
 		defer node.lock.Unlock()
-	}
 
-	// ensure that existing value is valid for new validator.
-	for node := range nodeSet {
 		entry := node.get(key)
 		if entry == nil {
 			continue
 		}
+		// ensure that existing value is valid for new validator.
 		if !validator.Validate(entry.KeyValue) {
 			return ErrIncompatibleValidator
 		}
@@ -217,6 +224,7 @@ func (c *Cluster) RegisterKey(key string, validator KVValidator, forceReplace bo
 		}
 		// unregister. we need to drop existing key-values in nodes.
 		c.clearKey(key)
+		return nil
 	}
 
 	if exists {
@@ -292,27 +300,34 @@ func (c *Cluster) Nodes(nodes ...interface{}) *OperationContext {
 }
 
 // RangeNodes iterate nodes.
-func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf bool) {
+func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf, excludeEmpty bool) {
 	if visit == nil {
 		return
 	}
 	c.lock.RLock()
 	defer c.lock.RUnlock()
-	c.rangeNodes(visit, excludeSelf)
+	c.rangeNodes(visit, excludeSelf, excludeEmpty)
 }
 
-func (c *Cluster) rangeNodes(visit func(*Node) bool, excludeSelf bool) {
-	nameSet := make(map[string]struct{}, len(c.nodes))
-	for name, node := range c.nodes {
-		if _, exist := nameSet[name]; exist {
+func (c *Cluster) rangeNodes(visit func(*Node) bool, excludeSelf, excludeEmpty bool) {
+	nodeSet := make(map[*Node]struct{}, len(c.nodes))
+	for _, node := range c.nodes {
+		if _, exist := nodeSet[node]; exist {
 			continue
 		}
-		nameSet[name] = struct{}{}
+		nodeSet[node] = struct{}{}
 		if excludeSelf && node == c.self {
 			continue
 		}
 		if !visit(node) {
 			break
+		}
+	}
+	if !excludeEmpty {
+		for node := range c.emptyNodes {
+			if !visit(node) {
+				break
+			}
 		}
 	}
 }
@@ -335,14 +350,14 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster, validate func(*Node) bool) 
 	}
 
 	c.rangeNodes(func(n *Node) bool {
-		if !validate(n) {
+		if validate != nil && !validate(n) {
 			return true
 		}
 		ns := &proto.Node{}
 		n.ProtobufSnapshot(ns)
 		s.Nodes = append(s.Nodes, ns)
 		return true
-	}, false)
+	}, false, true)
 }
 
 // RemoveNode removes node from cluster.

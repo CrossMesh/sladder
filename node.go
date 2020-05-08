@@ -142,6 +142,15 @@ func (n *Node) get(key string) (entry *KeyValueEntry) {
 	return
 }
 
+func (n *Node) delete(key string) {
+	entry := n.get(key)
+	if entry == nil {
+		return
+	}
+	delete(n.kvs, key)
+	n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
+}
+
 func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
 	n.lock.Lock()
 	defer n.lock.Unlock()

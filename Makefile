@@ -39,7 +39,7 @@ env:
 	@echo "export PATH=\"\$${PROJECT_ROOT}/bin:$${PATH}\""
 
 cloc:
-	cloc . --exclude-dir=build,bin,ci,mocks
+	cloc . --exclude-dir=build,bin,ci,mocks --not-match-f=mock_* --exclude-ext=pb.go
 
 proto: $(GOPATH)/bin/protoc-gen-go
 	protoc -I=$(PROJECT_ROOT) --go_out=module=$(GOMOD):. proto/core.proto
@@ -54,6 +54,7 @@ mock: bin/mockery
 	bin/mockery -inpkg -name EngineInstance -case underscore
 	bin/mockery -inpkg -name Engine -case underscore
 	bin/mockery -inpkg -name NodeNameResolver -case underscore
+	bin/mockery -inpkg -name KVValidator -case underscore
 
 exec:
 	$(CMD)

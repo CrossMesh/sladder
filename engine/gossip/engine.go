@@ -213,7 +213,7 @@ func (e *EngineInstance) selectRandomNodes(n int32, excludeSelf bool) []*sladder
 		}
 		cnt++
 		return true
-	}, true)
+	}, true, false)
 
 	return nodes
 }

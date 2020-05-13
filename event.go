@@ -40,8 +40,15 @@ type ClusterEventContext struct {
 // Unregister cancels event handler.
 func (c *ClusterEventContext) Unregister() { c.unregistered = true }
 
+type eventWorkList struct {
+	work func()
+	next *eventWorkList
+}
+
 type eventRegistry struct {
 	lock sync.RWMutex
+
+	arbiter *arbit.Arbiter
 
 	// event watchers
 	eventHandlers             map[*ClusterEventContext]struct{}
@@ -50,114 +57,134 @@ type eventRegistry struct {
 	nodeEventWatcherIndex     map[*Node]map[*WatchEventContext]struct{}
 
 	// event work queue for seralization.
-	sigWork chan func()
+	queueLock            sync.Mutex
+	barrierCond          *sync.Cond
+	workCond             *sync.Cond
+	nextWork             func()
+	queueHead, queueTail *eventWorkList
+	queuePool            sync.Pool
 }
 
-func newEventRegistry() *eventRegistry {
-	return &eventRegistry{
+func newEventRegistry(arbiter *arbit.Arbiter) (r *eventRegistry) {
+	r = &eventRegistry{
 		eventHandlers:             make(map[*ClusterEventContext]struct{}),
 		keyEventWatcherIndex:      make(map[string]map[*WatchEventContext]struct{}),
 		nodeNameEventWatcherIndex: make(map[string]map[*WatchEventContext]struct{}),
 		nodeEventWatcherIndex:     make(map[*Node]map[*WatchEventContext]struct{}),
-		sigWork:                   make(chan func()),
+		queuePool: sync.Pool{
+			New: func() interface{} { return &eventWorkList{} },
+		},
+		arbiter: arbiter,
+	}
+	r.barrierCond = sync.NewCond(&r.queueLock)
+	r.workCond = sync.NewCond(&r.queueLock)
+	return
+}
+
+func (r *eventRegistry) enqueueWork(work func()) {
+	if work == nil {
+		return
+	}
+	if r.nextWork == nil {
+		r.nextWork = work
+		return
+	}
+	if r.queueHead == nil {
+		r.queueHead = r.queuePool.Get().(*eventWorkList)
+		r.queueHead.work = work
+		r.queueTail = r.queueHead
+	} else {
+		r.queueTail.next = r.queuePool.Get().(*eventWorkList)
+		r.queueTail = r.queueTail.next
+		r.queueTail.work = work
 	}
 }
 
-func (r *eventRegistry) startWorker(arbiter *arbit.Arbiter) {
-	type eventWorkList struct {
-		work func()
-		next *eventWorkList
+func (r *eventRegistry) dequeueWork() (work func()) {
+	if r.queueHead == nil {
+		return nil
 	}
-	workChan := make(chan func())
-
-	var head, tail *eventWorkList
-	pool := sync.Pool{
-		New: func() interface{} { return &eventWorkList{} },
+	work = r.queueHead.work
+	old := r.queueHead
+	r.queueHead = r.queueHead.next
+	if r.queueHead == nil {
+		r.queueTail = nil
 	}
 
-	// schedule works.
-	arbiter.Go(func() {
-		var next func()
+	old.next, old.work = nil, nil // clean
+	r.queuePool.Put(old)
+	return work
+}
 
-	Schedule:
-		for {
-			if next == nil {
-				select {
-				case <-arbiter.Exit():
-					break Schedule
-				case ready := <-r.sigWork:
-					next = ready
-				}
-
-			} else {
-
-				select {
-				case <-arbiter.Exit():
-					break Schedule
-
-				case ready := <-r.sigWork:
-					// enqueue work.
-					if head == nil {
-						head = pool.Get().(*eventWorkList)
-						head.work = ready
-						tail = head
-					} else {
-						tail.next = pool.Get().(*eventWorkList)
-						tail = tail.next
-						tail.work = ready
-					}
-
-				case workChan <- next:
-					next = nil
-					// dequeue work.
-					if head != nil {
-						next = head.work
-						old := head
-						head = old.next
-						pool.Put(old)
-					}
-					if head == nil {
-						tail = nil
-					}
-				}
-			}
-		}
-	})
-
+func (r *eventRegistry) startWorker() {
 	// worker
-	arbiter.Go(func() {
-	Work:
-		for {
-			select {
-			case <-arbiter.Exit():
-				break Work
+	r.arbiter.Go(func() {
+		r.queueLock.Lock()
+		defer r.queueLock.Unlock()
 
-			case work := <-workChan:
-				work()
+		for r.arbiter.ShouldRun() {
+			if r.nextWork == nil {
+				r.nextWork = r.dequeueWork() // try dequeue work
+				if r.nextWork == nil {
+					r.barrierCond.Broadcast()
+				}
+			}
+			if next := r.nextWork; next != nil {
+				r.queueLock.Unlock()
+				next()
+				r.queueLock.Lock()
+
+				r.nextWork = nil
+			} else {
+				r.workCond.Wait()
 			}
 		}
 	})
+
+	r.arbiter.Go(func() {
+		<-r.arbiter.Exit()
+		r.queueLock.Lock()
+		defer r.queueLock.Unlock()
+		r.workCond.Broadcast()
+		return
+	})
+}
+
+// EventBarrier waits until event queue is drained .
+func (r *eventRegistry) EventBarrier() {
+	r.queueLock.Lock()
+	defer r.queueLock.Unlock()
+	if r.nextWork != nil || r.queueHead != nil {
+		r.barrierCond.Wait()
+	}
 }
 
 func (r *eventRegistry) emitEvent(event Event, node *Node) {
-	r.sigWork <- func() {
-		// call handlers.
-		r.lock.Lock()
-		defer r.lock.Unlock()
+	r.arbiter.Do(func() {
+		r.queueLock.Lock()
+		defer r.queueLock.Unlock()
 
-		for ctx := range r.eventHandlers {
-			if ctx.unregistered {
-				delete(r.eventHandlers, ctx)
-				continue
+		r.enqueueWork(func() {
+			// call handlers.
+			r.lock.Lock()
+			defer r.lock.Unlock()
+
+			for ctx := range r.eventHandlers {
+				if ctx.unregistered {
+					delete(r.eventHandlers, ctx)
+					continue
+				}
+
+				ctx.handler(ctx, event, node)
+
+				if ctx.unregistered {
+					delete(r.eventHandlers, ctx)
+				}
 			}
+		})
 
-			ctx.handler(ctx, event, node)
-
-			if ctx.unregistered {
-				delete(r.eventHandlers, ctx)
-			}
-		}
-	}
+		r.workCond.Broadcast()
+	})
 }
 
 // Watch registers event handler of cluster.
@@ -283,13 +310,18 @@ func (r *eventRegistry) emitKeyChange(node *Node, key, origin, new string) {
 }
 
 func (r *eventRegistry) emitKVEvent(meta KeyValueEventMetadata) {
-	r.sigWork <- func() {
-		r.lock.RLock()
-		defer r.lock.RUnlock()
-		for watch := range r.hitWatchContext(meta.Node(), meta.Key()) {
-			watch.handler(watch, meta)
-		}
-	}
+	r.arbiter.Do(func() {
+		r.queueLock.Lock()
+		defer r.queueLock.Unlock()
+		r.enqueueWork(func() {
+			r.lock.RLock()
+			defer r.lock.RUnlock()
+			for watch := range r.hitWatchContext(meta.Node(), meta.Key()) {
+				watch.handler(watch, meta)
+			}
+		})
+		r.workCond.Broadcast()
+	})
 }
 
 func (r *eventRegistry) hitWatchContext(node *Node, targetKey string) map[*WatchEventContext]struct{} {

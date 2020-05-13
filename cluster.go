@@ -61,24 +61,23 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		logger = DefaultLogger
 	}
 	c = &Cluster{
-		resolver:      resolver,
-		engine:        engine,
-		validators:    make(map[string]KVValidator),
-		nodes:         make(map[string]*Node),
-		emptyNodes:    make(map[*Node]struct{}),
-		eventRegistry: newEventRegistry(),
-		arbiter:       arbit.New(),
-		log:           logger,
+		resolver:   resolver,
+		engine:     engine,
+		validators: make(map[string]KVValidator),
+		nodes:      make(map[string]*Node),
+		emptyNodes: make(map[*Node]struct{}),
+		arbiter:    arbit.New(),
+		log:        logger,
 	}
 	c.self = newNode(c)
+	c.eventRegistry = newEventRegistry(c.arbiter)
 
 	// init engine for cluster.
 	if err = engine.Init(c); err != nil {
 		return nil, nil, err
 	}
 
-	c.startWorker(c.arbiter)
-	go func() { c.arbiter.Join() }()
+	c.startWorker()
 
 	if err = c.joinNode(c.self); err != nil {
 		if ierr := engine.Close(); ierr != nil {

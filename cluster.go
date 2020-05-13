@@ -295,7 +295,7 @@ func (c *Cluster) Keys(keys ...string) *OperationContext {
 
 // Nodes creates operation context
 func (c *Cluster) Nodes(nodes ...interface{}) *OperationContext {
-	return (&OperationContext{}).Nodes(nodes...)
+	return (&OperationContext{cluster: c}).Nodes(nodes...)
 }
 
 // RangeNodes iterate nodes.

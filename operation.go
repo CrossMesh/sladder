@@ -43,7 +43,7 @@ func (c *OperationContext) clone() *OperationContext {
 // Nodes filters nodes.
 func (c *OperationContext) Nodes(nodes ...interface{}) *OperationContext {
 	nc := c.clone()
-	if len(nc.nodes) > 0 {
+	if len(nc.nodes) > 0 || nc.nodes == nil {
 		nc.nodes = make(map[*Node]struct{})
 	}
 	if len(nc.nodeNames) > 0 {
@@ -220,13 +220,11 @@ func (c *OperationContext) Txn(proc interface{}) *OperationContext {
 }
 
 // Watch watches changes.
-func (c *OperationContext) Watch(handler WatchEventHandler) *OperationContext {
+func (c *OperationContext) Watch(handler WatchEventHandler) *WatchEventContext {
 	if handler == nil {
 		// ignore dummy handler.
-		return c
+		return nil
 	}
 
-	c.cluster.eventRegistry.watchKV(c.clone(), handler)
-
-	return c
+	return c.cluster.eventRegistry.watchKV(c.clone(), handler)
 }

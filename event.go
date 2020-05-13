@@ -211,8 +211,18 @@ type WatchEventHandler func(*WatchEventContext, KeyValueEventMetadata)
 
 // WatchEventContext contains watch event context.
 type WatchEventContext struct {
-	opCtx   *OperationContext
-	handler WatchEventHandler
+	registry *eventRegistry
+	opCtx    *OperationContext
+	handler  WatchEventHandler
+}
+
+// Unregister cancels watch.
+func (c *WatchEventContext) Unregister() {
+	r := c.registry
+	if r == nil {
+		return
+	}
+	r.cancelWatchKV(c)
 }
 
 // KeyValueEventMetadata contains metadata of KeyValue-related event.
@@ -325,7 +335,6 @@ func (r *eventRegistry) emitKVEvent(meta KeyValueEventMetadata) {
 }
 
 func (r *eventRegistry) hitWatchContext(node *Node, targetKey string) map[*WatchEventContext]struct{} {
-
 	// pick by *Node
 	ctxSet, _ := r.nodeEventWatcherIndex[node]
 	emitCtxSet := make(map[*WatchEventContext]struct{}, len(ctxSet))
@@ -351,7 +360,6 @@ filterByKey:
 				}
 			}
 			delete(emitCtxSet, ctx)
-
 		} // else {
 		// 		no key filtering....
 		// }
@@ -362,7 +370,7 @@ filterByKey:
 	for ctx := range keyCtxSet {
 		// We could just pick those who select the key but didn't select any node.
 		// Those who select node and key both are already in emit set.
-		if ctx.opCtx.nodes == nil && ctx.opCtx.nodeNames == nil {
+		if len(ctx.opCtx.nodes) < 1 && len(ctx.opCtx.nodeNames) < 1 {
 			emitCtxSet[ctx] = struct{}{}
 		}
 	}
@@ -370,14 +378,52 @@ filterByKey:
 	return emitCtxSet
 }
 
-func (r *eventRegistry) watchKV(opCtx *OperationContext, handler WatchEventHandler) {
+func (r *eventRegistry) cancelWatchKV(watchCtx *WatchEventContext) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	// unregister watcher.
+	for _, key := range watchCtx.opCtx.keys {
+		ctxSet, exists := r.keyEventWatcherIndex[key]
+		if !exists {
+			continue
+		}
+		delete(ctxSet, watchCtx)
+		if len(ctxSet) < 1 {
+			delete(r.keyEventWatcherIndex, key)
+		}
+	}
+	for _, nodeName := range watchCtx.opCtx.nodeNames {
+		ctxSet, exists := r.nodeNameEventWatcherIndex[nodeName]
+		if !exists {
+			continue
+		}
+		delete(ctxSet, watchCtx)
+		if len(ctxSet) < 1 {
+			delete(r.nodeNameEventWatcherIndex, nodeName)
+		}
+	}
+	for node := range watchCtx.opCtx.nodes {
+		ctxSet, exists := r.nodeEventWatcherIndex[node]
+		if !exists {
+			continue
+		}
+		delete(ctxSet, watchCtx)
+		if len(ctxSet) < 1 {
+			delete(r.nodeEventWatcherIndex, node)
+		}
+	}
+}
+
+func (r *eventRegistry) watchKV(opCtx *OperationContext, handler WatchEventHandler) (watchCtx *WatchEventContext) {
 	if handler == nil {
 		return
 	}
 
-	watchCtx := &WatchEventContext{
-		opCtx:   opCtx,
-		handler: handler,
+	watchCtx = &WatchEventContext{
+		registry: r,
+		opCtx:    opCtx,
+		handler:  handler,
 	}
 
 	r.lock.Lock()
@@ -388,6 +434,7 @@ func (r *eventRegistry) watchKV(opCtx *OperationContext, handler WatchEventHandl
 		ctxSet, exists := r.keyEventWatcherIndex[key]
 		if !exists {
 			ctxSet = make(map[*WatchEventContext]struct{})
+			r.keyEventWatcherIndex[key] = ctxSet
 		}
 		ctxSet[watchCtx] = struct{}{}
 	}
@@ -395,6 +442,7 @@ func (r *eventRegistry) watchKV(opCtx *OperationContext, handler WatchEventHandl
 		ctxSet, exists := r.nodeNameEventWatcherIndex[nodeName]
 		if !exists {
 			ctxSet = make(map[*WatchEventContext]struct{})
+			r.nodeNameEventWatcherIndex[nodeName] = ctxSet
 		}
 		ctxSet[watchCtx] = struct{}{}
 	}
@@ -402,7 +450,10 @@ func (r *eventRegistry) watchKV(opCtx *OperationContext, handler WatchEventHandl
 		ctxSet, exists := r.nodeEventWatcherIndex[node]
 		if !exists {
 			ctxSet = make(map[*WatchEventContext]struct{})
+			r.nodeEventWatcherIndex[node] = ctxSet
 		}
 		ctxSet[watchCtx] = struct{}{}
 	}
+
+	return
 }

@@ -1,6 +1,8 @@
 # Sladder
 
 [![Build Status](https://travis-ci.com/Sunmxt/sladder.svg?branch=master)](https://travis-ci.com/Sunmxt/sladder)
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/cafdd3da0f9446899223d786fcb63503)](https://www.codacy.com/manual/Sunmxt/sladder?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=Sunmxt/sladder&amp;utm_campaign=Badge_Grade)
+[![codecov](https://codecov.io/gh/Sunmxt/sladder/branch/master/graph/badge.svg)](https://codecov.io/gh/Sunmxt/sladder)
 
 **Sladder** is simple and embeded membership framework for service discovery and cluster management.
 

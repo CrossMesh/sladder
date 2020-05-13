@@ -41,7 +41,7 @@ func (n *Node) Names() (names []string) {
 
 // Keys selects keys.
 func (n *Node) Keys(keys ...string) *OperationContext {
-	return (&OperationContext{cluster: n.cluster}).Keys(keys...)
+	return (&OperationContext{cluster: n.cluster}).Keys(keys...).Nodes(n)
 }
 
 // KeyValueEntries return array existing entries.

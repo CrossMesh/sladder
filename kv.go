@@ -19,8 +19,8 @@ type KVValidator interface {
 
 // KVTransaction implements atomic operation.
 type KVTransaction interface {
-	// After returns new value.
-	After() (bool, string)
+	After() (bool, string) // After returns new value.
+	Before() string        // Before return origin raw value.
 }
 
 // KeyValueEntry holds KeyValue.

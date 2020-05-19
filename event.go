@@ -150,7 +150,7 @@ func (r *eventRegistry) startWorker() {
 	})
 }
 
-// EventBarrier waits until event queue is drained .
+// EventBarrier waits until event queue is drained.
 func (r *eventRegistry) EventBarrier() {
 	r.queueLock.Lock()
 	defer r.queueLock.Unlock()

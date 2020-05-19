@@ -26,24 +26,26 @@ func (r TestRandomNameResolver) Keys() []string {
 	return nil
 }
 
-func newTestFakedCluster(r NodeNameResolver) (*Cluster, *Node, error) {
+func newTestFakedCluster(r NodeNameResolver, ei EngineInstance) (*Cluster, *Node, error) {
 	if r == nil {
 		mnr := &MockNodeNameResolver{}
 		mnr.On("Keys").Return([]string{"id"})
 		mnr.On("Resolve", mock.Anything).Return([]string{"id1"}, error(nil))
 		r = mnr
 	}
-	ei := &MockEngineInstance{}
-
-	ei.Mock.On("Init", mock.Anything).Return(error(nil))
-	ei.Mock.On("Close").Return(error(nil))
+	if ei == nil {
+		e := &MockEngineInstance{}
+		e.Mock.On("Init", mock.Anything).Return(error(nil))
+		e.Mock.On("Close").Return(error(nil))
+		ei = e
+	}
 
 	return NewClusterWithNameResolver(ei, r, nil)
 }
 
 func TestCluster(t *testing.T) {
 	t.Run("cluster_new_normal", func(t *testing.T) {
-		c, self, err := newTestFakedCluster(nil)
+		c, self, err := newTestFakedCluster(nil, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
@@ -120,7 +122,7 @@ func TestCluster(t *testing.T) {
 
 	c, self, err := newTestFakedCluster(TestRandomNameResolver{
 		NumOfNames: 2,
-	})
+	}, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	assert.NotNil(t, self)

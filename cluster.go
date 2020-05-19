@@ -367,6 +367,9 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
 	// remove from empty node set.
 	if _, exists := c.emptyNodes[node]; exists {
 		delete(c.emptyNodes, node)

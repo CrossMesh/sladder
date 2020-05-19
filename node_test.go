@@ -10,7 +10,7 @@ import (
 )
 
 func TestNode(t *testing.T) {
-	c, self, err := newTestFakedCluster(TestRandomNameResolver{})
+	c, self, err := newTestFakedCluster(TestRandomNameResolver{}, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	assert.NotNil(t, self)

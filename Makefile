@@ -29,7 +29,7 @@ cover: coverage test
 	go tool cover -html=$(COVERAGE_DIR)/coverage.out -o $(COVERAGE_DIR)/coverage.html
 
 test: coverage
-	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -cover ./ ./engine/...
+	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -cover ./
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 
@@ -52,9 +52,9 @@ devtools: bin/gopls bin/goimports bin/protoc-gen-go bin/mockery
 
 mock: bin/mockery
 	bin/mockery -inpkg -name EngineInstance -case underscore
-	bin/mockery -inpkg -name Engine -case underscore
 	bin/mockery -inpkg -name NodeNameResolver -case underscore
 	bin/mockery -inpkg -name KVValidator -case underscore
+	bin/mockery -inpkg -name TxnCoordinator -case underscore
 
 exec:
 	$(CMD)

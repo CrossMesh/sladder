@@ -230,16 +230,19 @@ type KeyValueEventMetadata interface {
 	Key() string
 	Node() *Node
 	Event() Event
+	Snapshot() []*KeyValue
 }
 
 type keyValueEvent struct {
 	key  string
 	node *Node
+	snap []*KeyValue
 }
 
-func (e *keyValueEvent) Key() string  { return e.key }
-func (e *keyValueEvent) Node() *Node  { return e.node }
-func (e *keyValueEvent) Event() Event { return UnknownEvent }
+func (e *keyValueEvent) Key() string           { return e.key }
+func (e *keyValueEvent) Node() *Node           { return e.node }
+func (e *keyValueEvent) Event() Event          { return UnknownEvent }
+func (e *keyValueEvent) Snapshot() []*KeyValue { return e.snap }
 
 // KeyInsertEventMetadata contains metadata of KeyInsert event.
 type KeyInsertEventMetadata interface {
@@ -288,31 +291,34 @@ type keyDeleteEvent struct {
 func (e *keyDeleteEvent) Value() string { return e.value }
 func (e *keyDeleteEvent) Event() Event  { return KeyDelete }
 
-func (r *eventRegistry) emitKeyDeletion(node *Node, key, value string) {
+func (r *eventRegistry) emitKeyDeletion(node *Node, key, value string, snap []*KeyValue) {
 	r.emitKVEvent(&keyDeleteEvent{
 		keyValueEvent: keyValueEvent{
 			key:  key,
 			node: node,
+			snap: snap,
 		},
 		value: value,
 	})
 }
 
-func (r *eventRegistry) emitKeyInsertion(node *Node, key, value string) {
+func (r *eventRegistry) emitKeyInsertion(node *Node, key, value string, snap []*KeyValue) {
 	r.emitKVEvent(&keyInsertEvent{
 		keyValueEvent: keyValueEvent{
 			key:  key,
 			node: node,
+			snap: snap,
 		},
 		value: value,
 	})
 }
 
-func (r *eventRegistry) emitKeyChange(node *Node, key, origin, new string) {
+func (r *eventRegistry) emitKeyChange(node *Node, key, origin, new string, snap []*KeyValue) {
 	r.emitKVEvent(&keyChangeEvent{
 		keyValueEvent: keyValueEvent{
 			key:  key,
 			node: node,
+			snap: snap,
 		},
 		old: origin,
 		new: new,

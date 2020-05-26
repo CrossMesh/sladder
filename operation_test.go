@@ -17,17 +17,41 @@ func (m *MockKVTransaction) Set(key string)        { m.updated, m.new = true, ke
 func (m *MockKVTransaction) After() (bool, string) { return m.updated, m.new }
 func (m *MockKVTransaction) Before() string        { return m.old }
 
-type MockKVTransactionValidator struct{}
+type MockKVTransactionValidator struct {
+	SyncFailKeyMap map[string]error
+}
 
-func (v MockKVTransactionValidator) Sync(e *KeyValueEntry, kv *KeyValue) (bool, error) {
-	if kv != nil && e != nil {
+func (v *MockKVTransactionValidator) AddFailKey(key string, err error) {
+	if v.SyncFailKeyMap == nil {
+		v.SyncFailKeyMap = make(map[string]error)
+	}
+	v.SyncFailKeyMap[key] = err
+}
+
+func (v *MockKVTransactionValidator) DelateFailKey(key string) {
+	if v.SyncFailKeyMap == nil {
+		return
+	}
+	delete(v.SyncFailKeyMap, key)
+}
+
+func (v *MockKVTransactionValidator) Sync(e *KeyValueEntry, kv *KeyValue) (bool, error) {
+	if e == nil {
+		return false, nil
+	}
+	if v.SyncFailKeyMap != nil {
+		if err, fail := v.SyncFailKeyMap[e.Key]; fail {
+			return false, err
+		}
+	}
+	if kv != nil {
 		e.KeyValue.Key = kv.Key
 		e.KeyValue.Value = kv.Value
 	}
-	return false, nil
+	return true, nil
 }
-func (v MockKVTransactionValidator) Validate(kv KeyValue) bool { return true }
-func (v MockKVTransactionValidator) Txn(kv KeyValue) (KVTransaction, error) {
+func (v *MockKVTransactionValidator) Validate(kv KeyValue) bool { return true }
+func (v *MockKVTransactionValidator) Txn(kv KeyValue) (KVTransaction, error) {
 	return &MockKVTransaction{
 		updated: false,
 		old:     kv.Value,
@@ -81,7 +105,7 @@ func (m *MockCoordinatingEngine) TransactionRollback(txn *Transaction) error {
 
 func TestOperation(t *testing.T) {
 	t.Run("test_select", func(t *testing.T) {
-		c, self, err := newTestFakedCluster(nil, nil)
+		c, self, err := newTestFakedCluster(nil, nil, nil)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
 		assert.NoError(t, err)
@@ -133,7 +157,7 @@ func TestOperation(t *testing.T) {
 		ei.MockEngineInstance.On("Init", mock.Anything).Return(nil)
 		ei.MockEngineInstance.On("Close").Return(nil)
 
-		c, self, err := newTestFakedCluster(nil, ei)
+		c, self, err := newTestFakedCluster(nil, ei, nil)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
 		assert.NoError(t, err)
@@ -148,7 +172,7 @@ func TestOperation(t *testing.T) {
 		// coordinator start failure.
 		rejectStart := func(*Transaction) (bool, error) { return false, nil }
 		ei.hook.start = rejectStart
-		assert.Equal(t, ErrRejectedByCoordinator, c.Txn(func(tx *Transaction) bool {
+		assert.Equal(t, ErrRejectedByValidator, c.Txn(func(tx *Transaction) bool {
 			assert.Fail(t, "should not start transaction.")
 			return false
 		}))
@@ -279,7 +303,7 @@ func TestOperation(t *testing.T) {
 		// reject commit
 		rejectCommit := func(*Transaction, []*KVTransactionRecord) (bool, error) { return false, nil }
 		ei.hook.commit = rejectCommit
-		assert.Equal(t, ErrRejectedByCoordinator, c.Txn(func(tx *Transaction) bool {
+		assert.Equal(t, ErrRejectedByValidator, c.Txn(func(tx *Transaction) bool {
 			{
 				k1, err := tx.KV(self, "key1")
 				assert.NoError(t, err)
@@ -312,7 +336,7 @@ func TestOperation(t *testing.T) {
 		ei.MockEngineInstance.On("Init", mock.Anything).Return(nil)
 		ei.MockEngineInstance.On("Close").Return(nil)
 
-		c, self, err := newTestFakedCluster(nil, ei)
+		c, self, err := newTestFakedCluster(nil, ei, nil)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
 		assert.NoError(t, err)

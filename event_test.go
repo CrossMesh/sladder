@@ -46,7 +46,7 @@ func TestEvent(t *testing.T) {
 
 	c, self, err := newTestFakedCluster(TestRandomNameResolver{
 		NumOfNames: 1,
-	}, nil)
+	}, nil, nil)
 	assert.NotNil(t, c)
 	assert.NotNil(t, self)
 	assert.NoError(t, err)
@@ -142,13 +142,13 @@ func TestEvent(t *testing.T) {
 		ctx := c.Keys("key1").Watch(func(ctx *WatchEventContext, meta KeyValueEventMetadata) {
 			called = true
 		})
-		r.emitKeyInsertion(self, "key1", "2")
+		r.emitKeyInsertion(self, "key1", "2", self.KeyValueEntries(true))
 		r.EventBarrier()
 		assert.True(t, called)
 
 		ctx.Unregister()
 		called = false
-		r.emitKeyInsertion(self, "key1", "2")
+		r.emitKeyInsertion(self, "key1", "2", self.KeyValueEntries(true))
 		r.EventBarrier()
 		assert.False(t, called)
 	})
@@ -200,20 +200,20 @@ func TestEvent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			// insert
-			r.emitKeyInsertion(self, "key1", "2")
-			r.emitKeyInsertion(n1, "key1", "4")
-			r.emitKeyInsertion(self, "key2", "3")
-			r.emitKeyInsertion(n1, "key2", "1")
+			r.emitKeyInsertion(self, "key1", "2", self.KeyValueEntries(true))
+			r.emitKeyInsertion(n1, "key1", "4", n1.KeyValueEntries(true))
+			r.emitKeyInsertion(self, "key2", "3", self.KeyValueEntries(true))
+			r.emitKeyInsertion(n1, "key2", "1", n1.KeyValueEntries(true))
 
 			// change
-			r.emitKeyChange(self, "key1", "2", "3")
-			r.emitKeyChange(self, "key2", "3", "1")
-			r.emitKeyChange(n1, "key1", "2", "3")
-			r.emitKeyChange(n1, "key2", "1", "5")
+			r.emitKeyChange(self, "key1", "2", "3", self.KeyValueEntries(true))
+			r.emitKeyChange(self, "key2", "3", "1", self.KeyValueEntries(true))
+			r.emitKeyChange(n1, "key1", "2", "3", self.KeyValueEntries(true))
+			r.emitKeyChange(n1, "key2", "1", "5", self.KeyValueEntries(true))
 
 			// delete
-			r.emitKeyDeletion(self, "key1", "2")
-			r.emitKeyDeletion(self, "key2", "3")
+			r.emitKeyDeletion(self, "key1", "2", self.KeyValueEntries(true))
+			r.emitKeyDeletion(self, "key2", "3", self.KeyValueEntries(true))
 			r.EventBarrier()
 
 			wg.Done()

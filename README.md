@@ -16,7 +16,7 @@
 
 ### Engines
 
-Gossip engine are currently supported, using an extended version of algorithm from [**《SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol》**](http://www.cs.cornell.edu/Info/Projects/Spinglass/public_pdfs/SWIM.pdf)。
+Gossip engine are currently supported. It use an extended version of algorithm from [**《SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol》**](http://www.cs.cornell.edu/Info/Projects/Spinglass/public_pdfs/SWIM.pdf). In CAP terms, gossip engine builds an AP system.
 
 Etcd engine is in plan.
 

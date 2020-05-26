@@ -16,7 +16,7 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) []
 			continue
 		}
 		if kv == nil {
-			kv = &KeyValue{
+			watchKeySet[entry.Key] = &KeyValue{
 				Key:   entry.Key,
 				Value: entry.Value,
 			}
@@ -80,17 +80,26 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 	)
 	existingKeySet := make(map[string]struct{}, len(s.Kvs))
 
-	syncEntry := func(entry *KeyValueEntry, msgKV *proto.Node_KeyValue) bool {
-		accepted, err := entry.validator.Sync(entry, &KeyValue{
-			Key:   msgKV.Key,
-			Value: msgKV.Value,
-		})
+	syncEntry := func(entry *KeyValueEntry, msgKV *proto.Node_KeyValue) (accepted bool) {
+		var err error
+
+		if msgKV == nil {
+			accepted, err = entry.validator.Sync(entry, nil)
+		} else {
+			accepted, err = entry.validator.Sync(entry, &KeyValue{
+				Key:   msgKV.Key,
+				Value: msgKV.Value,
+			})
+		}
 		if err != nil {
-			n.cluster.log.Fatalf("validator failure: %v {key = %v}", err, msgKV.Key)
+			n.cluster.log.Fatalf("validator failure: %v {key = %v}", err, entry.Key)
 			return false
 		}
 		return accepted
 	}
+
+	n.lock.Lock()
+	defer n.lock.Unlock()
 
 	for _, msg := range s.Kvs {
 		key := msg.Key
@@ -100,6 +109,7 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 			if validator, _ = n.cluster.validators[key]; validator == nil {
 				// not accaptable for missing validator.
 				n.cluster.log.Warnf("missing key-value validator for new remote entry {nodeID = %v, key = %v}", n.PrintableName(), key)
+				continue
 			}
 			entry = &KeyValueEntry{
 				validator: validator,
@@ -110,14 +120,14 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 			if accepted = syncEntry(entry, msg); accepted {
 				// save accepted entry.
 				n.kvs[key] = entry
-				n.cluster.emitKeyInsertion(n, entry.Key, entry.Value)
+				n.cluster.emitKeyInsertion(n, entry.Key, entry.Value, n.keyValueEntries(true))
 			}
 		} else {
 			// existing one.
 			// sync to storage entry.
 			origin := entry.Value
 			if accepted = syncEntry(entry, msg); accepted {
-				n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value)
+				n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value, n.keyValueEntries(true))
 			}
 		}
 		if accepted {
@@ -129,7 +139,7 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 	for key, entry := range n.kvs {
 		if _, exist := existingKeySet[entry.Key]; !exist && syncEntry(entry, nil) {
 			delete(n.kvs, key)
-			n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
+			n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
 		}
 	}
 }

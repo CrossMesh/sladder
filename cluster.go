@@ -2,6 +2,7 @@ package sladder
 
 import (
 	"errors"
+	"sort"
 	"sync"
 
 	arbit "github.com/sunmxt/arbiter"
@@ -46,49 +47,90 @@ type Cluster struct {
 
 	arbiter *arbit.Arbiter
 
+	// Whether node should be preserved when all node names removed.
+	PreserveUnnamed bool
+
 	log Logger
 }
 
 // EngineOption contains engine-specific parameters.
 type EngineOption interface{}
 
+// ClusterOption contains cluster parameters.
+type ClusterOption interface{}
+
+type preserveUnnamedOption bool
+
+// PreserveUnnamedNode is option indicating whether unnamed node should be preserved.
+func PreserveUnnamedNode(x bool) ClusterOption { return PreserveUnnamedNode(x) }
+
 // NewClusterWithNameResolver creates new cluster.
-func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver, logger Logger) (c *Cluster, self *Node, err error) {
+func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver, options ...ClusterOption) (c *Cluster, self *Node, err error) {
+	var logger Logger
+
 	if resolver == nil {
 		return nil, nil, ErrMissingNameResolver
 	}
-	if logger == nil {
-		logger = DefaultLogger
-	}
-	c = &Cluster{
+
+	nc := &Cluster{
 		resolver:   resolver,
 		engine:     engine,
 		validators: make(map[string]KVValidator),
 		nodes:      make(map[string]*Node),
 		emptyNodes: make(map[*Node]struct{}),
 		arbiter:    arbit.New(),
-		log:        logger,
 	}
-	c.self = newNode(c)
-	c.eventRegistry = newEventRegistry(c.arbiter)
+
+	for _, opt := range options {
+		switch o := opt.(type) {
+		case Logger:
+			logger = o
+		case preserveUnnamedOption:
+			nc.PreserveUnnamed = bool(o)
+		}
+	}
+	if logger == nil {
+		logger = DefaultLogger
+	}
+	nc.log = logger
+
+	nc.self = newNode(nc)
+	nc.eventRegistry = newEventRegistry(nc.arbiter)
 
 	// init engine for cluster.
-	if err = engine.Init(c); err != nil {
+	if err = engine.Init(nc); err != nil {
 		return nil, nil, err
 	}
 
-	c.startWorker()
+	nc.startWorker()
 
-	if err = c.joinNode(c.self); err != nil {
+	defer func() {
+		// terminate all in case of any failure.
+		if err != nil {
+			nc.arbiter.Shutdown()
+			nc.arbiter.Join()
+		}
+	}()
+
+	// watch key for resolver.
+	idKeys := resolver.Keys()
+	if len(idKeys) > 0 {
+		ctx := nc.Keys(idKeys...).Watch(nc.updateNodeID)
+		if ctx == nil {
+			msg := "got nil watch context when register watcher for resolver."
+			nc.log.Fatal(msg)
+			return nil, nil, errors.New(msg)
+		}
+	}
+
+	if err = nc.joinNode(nc.self); err != nil {
 		if ierr := engine.Close(); ierr != nil {
 			panic(err)
 		}
-		c.arbiter.Shutdown()
-		c.arbiter.Join()
 		return nil, nil, err
 	}
 
-	return c, c.self, nil
+	return nc, nc.self, nil
 }
 
 // Self returns self node.
@@ -106,6 +148,37 @@ func (c *Cluster) GetNode(name string) *Node {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	return c.getNode(name)
+}
+
+// ContainNodes checks whether specfic nodes belong to cluster.
+func (c *Cluster) ContainNodes(nodes ...interface{}) bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+checkNodes:
+	for _, raw := range nodes {
+		switch n := raw.(type) {
+		case string:
+			if c.getNode(n) == nil {
+				return false
+			}
+
+		case *Node:
+			if n == c.self {
+				continue checkNodes
+			}
+			if _, exists := c.emptyNodes[n]; exists {
+				continue checkNodes
+			}
+			for _, name := range n.names {
+				if _, exists := c.nodes[name]; exists {
+					continue checkNodes
+				}
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // MostPossibleNode return the node whose names cover most of names in given set.
@@ -150,7 +223,7 @@ func (c *Cluster) clearKey(key string) {
 		entry, exist := node.kvs[key]
 		if exist {
 			delete(node.kvs, key)
-			c.emitKeyDeletion(node, entry.Key, entry.Value)
+			c.emitKeyDeletion(node, entry.Key, entry.Value, node.keyValueEntries(true))
 		}
 		node.lock.Unlock()
 	}
@@ -238,19 +311,60 @@ func (c *Cluster) RegisterKey(key string, validator KVValidator, forceReplace bo
 	return nil
 }
 
-func (c *Cluster) registerNode(names []string, n *Node) {
-	if n != nil {
-		for _, name := range names {
-			c.nodes[name] = n
-		}
-		n.names = names
-		c.emitEvent(NodeJoined, n)
+func (c *Cluster) updateNodeID(ctx *WatchEventContext, meta KeyValueEventMetadata) {
+	// TODO: deduplicate snapshots.
+	c.updateNodeNameFromKV(meta.Node(), meta.Snapshot())
+}
+
+func (c *Cluster) updateNodeName(n *Node, newNames []string) {
+	if n == nil {
 		return
 	}
+	n.lock.Lock()
+	defer n.lock.Unlock()
 
-	for _, name := range names {
-		delete(c.nodes, name)
+	if len(n.names) < 1 {
+		if len(newNames) < 1 { // no name.
+			c.emptyNodes[n] = struct{}{}
+		} else { // has names.
+			delete(c.emptyNodes, n)
+			c.emitEvent(NodeJoined, n)
+		}
+	} else if len(newNames) < 1 { // all names removed.
+		if !c.PreserveUnnamed && c.self != n {
+			c.removeNode(n)
+		} else {
+			// move to empty node set.
+			c.emptyNodes[n] = struct{}{}
+		}
 	}
+
+	sort.Strings(newNames)
+	var mergedNames []string
+
+	// update name index.
+	rangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
+		if s != nil { // remove old name index.
+			delete(c.nodes, *s)
+		}
+		return true
+	}, func(s *string) bool {
+		// new name.
+		stored, exists := c.nodes[*s]
+		if exists && stored != n { // ununique name.
+			c.log.Warnf("drop ununique name %v of node with new names %v", *s, newNames)
+			return true
+		}
+		c.nodes[*s] = n
+		mergedNames = append(mergedNames, *s)
+		return true
+	}, func(s *string) bool {
+		mergedNames = append(mergedNames, *s)
+		return true
+	})
+
+	// save to node.
+	n.assignNames(mergedNames, true)
 }
 
 // NewNode creates an new empty node in cluster.
@@ -269,15 +383,21 @@ func (c *Cluster) joinNode(n *Node) error {
 	if err != nil {
 		return err
 	}
-	if len(names) > 0 {
-		// has valid names. register to cluster.
-		c.registerNode(names, n)
-
-	} else {
-		c.emptyNodes[n] = struct{}{}
-	}
+	c.updateNodeName(n, names)
 
 	return nil
+}
+
+func (c *Cluster) updateNodeNameFromKV(n *Node, snap []*KeyValue) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	newNames, err := c.resolver.Resolve(snap...)
+	if err != nil {
+		c.log.Fatal("resolver failure when node names update, got " + err.Error())
+		return
+	}
+	c.updateNodeName(n, newNames)
 }
 
 func (c *Cluster) newNode() (n *Node, err error) {
@@ -359,17 +479,7 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster, validate func(*Node) bool) 
 	}, false, true)
 }
 
-// RemoveNode removes node from cluster.
-func (c *Cluster) RemoveNode(node *Node) (removed bool) {
-	if node == nil {
-		return false
-	}
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	node.lock.Lock()
-	defer node.lock.Unlock()
-
+func (c *Cluster) removeNode(node *Node) (removed bool) {
 	// remove from empty node set.
 	if _, exists := c.emptyNodes[node]; exists {
 		delete(c.emptyNodes, node)
@@ -400,6 +510,20 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool) {
 	}
 
 	return
+}
+
+// RemoveNode removes node from cluster.
+func (c *Cluster) RemoveNode(node *Node) (removed bool) {
+	if node == nil {
+		return false
+	}
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	return c.removeNode(node)
 }
 
 // Quit sends "leave" message to cluster and shops member sync.

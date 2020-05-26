@@ -10,7 +10,7 @@ import (
 )
 
 func TestNode(t *testing.T) {
-	c, self, err := newTestFakedCluster(TestRandomNameResolver{}, nil)
+	c, self, err := newTestFakedCluster(TestRandomNameResolver{}, nil, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	assert.NotNil(t, self)
@@ -19,6 +19,9 @@ func TestNode(t *testing.T) {
 	model1.On("Validate", mock.Anything).Return(true)
 	model2.On("Validate", mock.Anything).Return(false)
 	model3.On("Validate", mock.Anything).Return(true)
+	model1.On("Sync", mock.Anything, (*KeyValue)(nil)).Return(true, nil)
+	model2.On("Sync", mock.Anything, (*KeyValue)(nil)).Return(true, nil)
+	model3.On("Sync", mock.Anything, (*KeyValue)(nil)).Return(true, nil)
 
 	t.Run("test_printable_name", func(t *testing.T) {
 		emptyNode := newNode(c)

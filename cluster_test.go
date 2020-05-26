@@ -11,6 +11,43 @@ import (
 	"github.com/sunmxt/sladder/proto"
 )
 
+type MockNodeNameKVResolver struct {
+	MockNodeNameResolver
+
+	IDKeys map[string]struct{}
+}
+
+func (r *MockNodeNameKVResolver) UseKeyAsID(keys ...string) {
+	if r.IDKeys == nil {
+		r.IDKeys = make(map[string]struct{})
+	}
+	for _, key := range keys {
+		r.IDKeys[key] = struct{}{}
+	}
+}
+
+func (r *MockNodeNameKVResolver) Keys() (keys []string) {
+	if r.IDKeys == nil {
+		return r.MockNodeNameResolver.Keys()
+	}
+	for key := range r.IDKeys {
+		keys = append(keys, key)
+	}
+	return
+}
+
+func (r *MockNodeNameKVResolver) Resolve(kvs ...*KeyValue) (ids []string, err error) {
+	if r.IDKeys == nil {
+		return r.MockNodeNameResolver.Resolve(kvs...)
+	}
+	for _, kv := range kvs {
+		if _, in := r.IDKeys[kv.Key]; in {
+			ids = append(ids, kv.Value)
+		}
+	}
+	return
+}
+
 type TestRandomNameResolver struct {
 	NumOfNames int
 }
@@ -26,11 +63,9 @@ func (r TestRandomNameResolver) Keys() []string {
 	return nil
 }
 
-func newTestFakedCluster(r NodeNameResolver, ei EngineInstance) (*Cluster, *Node, error) {
+func newTestFakedCluster(r NodeNameResolver, ei EngineInstance, logger Logger) (*Cluster, *Node, error) {
 	if r == nil {
-		mnr := &MockNodeNameResolver{}
-		mnr.On("Keys").Return([]string{"id"})
-		mnr.On("Resolve", mock.Anything).Return([]string{"id1"}, error(nil))
+		mnr := &TestRandomNameResolver{NumOfNames: 1}
 		r = mnr
 	}
 	if ei == nil {
@@ -40,12 +75,12 @@ func newTestFakedCluster(r NodeNameResolver, ei EngineInstance) (*Cluster, *Node
 		ei = e
 	}
 
-	return NewClusterWithNameResolver(ei, r, nil)
+	return NewClusterWithNameResolver(ei, r, logger)
 }
 
 func TestCluster(t *testing.T) {
 	t.Run("cluster_new_normal", func(t *testing.T) {
-		c, self, err := newTestFakedCluster(nil, nil)
+		c, self, err := newTestFakedCluster(nil, nil, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
@@ -120,9 +155,86 @@ func TestCluster(t *testing.T) {
 		assert.Nil(t, self)
 	})
 
+	t.Run("test_name_resolve", func(t *testing.T) {
+		mnr := &MockNodeNameKVResolver{}
+		mnr.UseKeyAsID("id1", "id2", "id3")
+
+		m := &MockKVValidator{}
+		m.On("Validate", mock.Anything).Return(true)
+		m.On("Sync", mock.Anything, (*KeyValue)(nil)).Return(true, nil)
+
+		c, self, err := newTestFakedCluster(mnr, nil, nil)
+		assert.NoError(t, err)
+		assert.NotNil(t, self)
+		assert.NotNil(t, c)
+		assert.NoError(t, c.RegisterKey("id1", m, false, 0))
+		assert.NoError(t, c.RegisterKey("id2", m, false, 0))
+		assert.NoError(t, c.RegisterKey("id3", m, false, 0))
+		assert.Equal(t, 0, len(self.Names()))
+
+		var n1 *Node
+		n1, err = c.NewNode()
+		assert.NoError(t, err)
+		assert.NotNil(t, n1)
+
+		// add ids.
+		self.Set("id1", "ea309")
+		self.Set("id2", "ea307")
+		c.EventBarrier()
+		assert.Equal(t, 2, len(self.Names()))
+		assert.Contains(t, self.names, "ea309")
+		assert.Contains(t, self.names, "ea307")
+		assert.NotNil(t, c.GetNode("ea309"))
+		assert.NotNil(t, c.GetNode("ea307"))
+
+		// id changes.
+		self.Set("id1", "ea388")
+		self.Set("id2", "ea381")
+		self.Set("id3", "ea389")
+		c.EventBarrier()
+		assert.Equal(t, 3, len(self.Names()))
+		assert.Contains(t, self.names, "ea388")
+		assert.Contains(t, self.names, "ea381")
+		assert.Contains(t, self.names, "ea389")
+		assert.NotNil(t, c.GetNode("ea389"))
+		assert.NotNil(t, c.GetNode("ea388"))
+		assert.NotNil(t, c.GetNode("ea381"))
+
+		// reject duplated name.
+		n1.Set("id1", "ea389")
+		n1.Set("id2", "ea008")
+		c.EventBarrier()
+		assert.Equal(t, 1, len(n1.Names()))
+		assert.Contains(t, n1.names, "ea008")
+		assert.Equal(t, self, c.GetNode("ea389"))
+		assert.Equal(t, n1, c.GetNode("ea008"))
+
+		// id delete.
+		assert.NoError(t, c.RegisterKey("id3", nil, false, 0))
+		c.EventBarrier()
+		assert.Equal(t, 2, len(self.Names()))
+		assert.Contains(t, self.names, "ea388")
+		assert.Contains(t, self.names, "ea381")
+		assert.Nil(t, c.GetNode("ea389"))
+		assert.NotNil(t, c.GetNode("ea388"))
+		assert.NotNil(t, c.GetNode("ea381"))
+
+		self.Delete("id1")
+		self.Delete("id2")
+		n1.Delete("id1")
+		n1.Delete("id2")
+		c.EventBarrier()
+		assert.Equal(t, 0, len(self.Names()))
+		assert.Nil(t, c.GetNode("ea389"))
+		assert.Nil(t, c.GetNode("ea388"))
+		assert.Nil(t, c.GetNode("ea381"))
+		assert.True(t, c.ContainNodes(self))
+		assert.False(t, c.ContainNodes(n1))
+	})
+
 	c, self, err := newTestFakedCluster(TestRandomNameResolver{
 		NumOfNames: 2,
-	}, nil)
+	}, nil, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	assert.NotNil(t, self)

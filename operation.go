@@ -10,7 +10,6 @@ import (
 var (
 	ErrInvalidTransactionHandler = errors.New("invalid transaction handler")
 	ErrTooManyNodes              = errors.New("too many nodes selected")
-	ErrRejectedByCoordinator     = errors.New("coordinator rejects the transaction")
 	ErrInvalidNode               = errors.New("invalid node")
 )
 
@@ -74,7 +73,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
 			return err
 		}
 		if !commit {
-			return ErrRejectedByCoordinator
+			return ErrRejectedByValidator
 		}
 	}
 	// do transaction.
@@ -110,7 +109,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
 		t.commit()
 	} else {
 		t.cancel()
-		return ErrRejectedByCoordinator
+		return ErrRejectedByValidator
 	}
 
 	return nil
@@ -167,7 +166,7 @@ func (t *Transaction) commit() {
 				// updated
 				origin := entry.Value
 				entry.Value = newValue
-				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue)
+				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue, ref.node.keyValueEntries(true))
 			}
 			entry.lock.Unlock()
 		} else if updated {
@@ -179,7 +178,7 @@ func (t *Transaction) commit() {
 				},
 			}
 			ref.node.kvs[ref.key] = entry
-			t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue)
+			t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue, ref.node.keyValueEntries(true))
 		}
 	}
 	t.cleanLocks()

@@ -3,14 +3,16 @@ package sladder
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/sunmxt/sladder/proto"
 )
 
 var (
-	ErrValidatorMissing = errors.New("missing validator")
-	ErrInvalidKeyValue  = errors.New("invalid key value pair")
+	ErrValidatorMissing    = errors.New("missing validator")
+	ErrRejectedByValidator = errors.New("operation rejected by validator")
+	ErrInvalidKeyValue     = errors.New("invalid key value pair")
 )
 
 // Node represents members of cluster.
@@ -39,6 +41,13 @@ func (n *Node) Names() (names []string) {
 	return
 }
 
+func (n *Node) assignNames(names []string, sorted bool) {
+	if !sorted {
+		sort.Strings(names)
+	}
+	n.names = names
+}
+
 // Keys selects keys.
 func (n *Node) Keys(keys ...string) *OperationContext {
 	return (&OperationContext{cluster: n.cluster}).Keys(keys...).Nodes(n)
@@ -49,6 +58,10 @@ func (n *Node) KeyValueEntries(clone bool) (entries []*KeyValue) {
 	n.lock.RLock()
 	defer n.lock.RUnlock()
 
+	return n.keyValueEntries(clone)
+}
+
+func (n *Node) keyValueEntries(clone bool) (entries []*KeyValue) {
 	for _, entry := range n.kvs {
 		kv := &entry.KeyValue
 		if clone {
@@ -56,39 +69,76 @@ func (n *Node) KeyValueEntries(clone bool) (entries []*KeyValue) {
 		}
 		entries = append(entries, kv)
 	}
-
 	return
+}
+
+// Delete remove KeyValue.
+func (n *Node) Delete(key string) (bool, error) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	return n.delete(key)
+}
+
+func (n *Node) delete(key string) (bool, error) {
+	entry := n.get(key)
+	if entry == nil {
+		return false, nil
+	}
+	accepted, err := entry.validator.Sync(entry, nil)
+	if err != nil {
+		return false, err
+	}
+	if !accepted {
+		return false, ErrRejectedByValidator
+	}
+
+	delete(n.kvs, key)
+	n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
+	return true, nil
 }
 
 // Set sets KeyValue.
 func (n *Node) Set(key, value string) error {
+	var entry *KeyValueEntry
+	var validator KVValidator
+
 	n.lock.Lock()
-	defer n.lock.Unlock()
 
 	entry, exists := n.kvs[key]
-	if !exists {
-		// new KV.
+	for !exists || entry == nil {
+		// lock order should be preserved to avoid deadlock.
+		// that is: acquire cluster lock, then acquire node lock.
+		n.lock.Unlock()
 		n.cluster.lock.RLock()
-		validator, exists := n.cluster.validators[key]
+		validator, exists = n.cluster.validators[key]
 		n.cluster.lock.RUnlock()
-
 		if !exists {
 			return ErrValidatorMissing
 		}
-		entry = &KeyValueEntry{
+		// new KV.
+		newEntry := &KeyValueEntry{
 			KeyValue: KeyValue{
 				Key:   key,
 				Value: value,
 			},
 			validator: validator,
 		}
-		if !validator.Validate(entry.KeyValue) {
+		if !validator.Validate(newEntry.KeyValue) {
 			return ErrInvalidKeyValue
 		}
-		n.kvs[key] = entry
-		n.cluster.emitKeyInsertion(n, entry.Key, entry.Value)
+
+		n.lock.Lock()
+		if entry, exists = n.kvs[key]; exists {
+			continue
+		}
+		n.kvs[key] = newEntry
+		n.cluster.emitKeyInsertion(n, newEntry.Key, newEntry.Value, n.keyValueEntries(true))
+		n.lock.Unlock()
 		return nil
 	}
+
+	defer n.lock.Unlock()
 
 	// modify existing entry.
 	if !entry.validator.Validate(KeyValue{
@@ -100,7 +150,7 @@ func (n *Node) Set(key, value string) error {
 	origin := entry.Value
 	entry.Value = value
 	entry.Key = key
-	n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value)
+	n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value, n.keyValueEntries(true))
 
 	return nil
 }
@@ -142,15 +192,6 @@ func (n *Node) get(key string) (entry *KeyValueEntry) {
 	return
 }
 
-func (n *Node) delete(key string) {
-	entry := n.get(key)
-	if entry == nil {
-		return
-	}
-	delete(n.kvs, key)
-	n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
-}
-
 func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
@@ -164,7 +205,7 @@ func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
 	if !validator.Validate(entry.KeyValue) {
 		// drop entry in case of incompatiable validator.
 		delete(n.kvs, key)
-		n.cluster.emitKeyDeletion(n, entry.Key, entry.Value)
+		n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
 	} else {
 		entry.validator = validator // replace.
 	}

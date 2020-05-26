@@ -9,8 +9,10 @@ type discardLogger struct {
 	*log.Logger
 }
 
-func (l *discardLogger) Warn(v ...interface{})                 {}
-func (l *discardLogger) Warnf(format string, v ...interface{}) {}
+func (l *discardLogger) Warn(v ...interface{})                  {}
+func (l *discardLogger) Warnf(format string, v ...interface{})  {}
+func (l *discardLogger) Fatal(v ...interface{})                 {}
+func (l *discardLogger) Fatalf(format string, v ...interface{}) {}
 
 var (
 	// DefaultLogger implements defaule logging behaviours.

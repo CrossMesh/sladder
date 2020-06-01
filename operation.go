@@ -35,8 +35,9 @@ type txnKeyRef struct {
 }
 
 type txnTrace struct {
-	txn KVTransaction
-	lc  uint32
+	txn       KVTransaction
+	validator KVValidator
+	lc        uint32
 }
 
 // Transaction contains read-write operation on nodes.
@@ -73,7 +74,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
 			return err
 		}
 		if !commit {
-			return ErrRejectedByValidator
+			return ErrRejectedByCoordinator
 		}
 	}
 	// do transaction.
@@ -158,10 +159,11 @@ func (t *Transaction) cleanLocks() {
 }
 
 func (t *Transaction) commit() {
+	// TODO(xutao): ensure consistency between entries and node names.
 	for ref, trace := range t.txns {
 		updated, newValue := trace.txn.After()
 		entry, exists := ref.node.kvs[ref.key]
-		if exists && entry != nil {
+		if exists && entry != nil { // exists.
 			if updated {
 				// updated
 				origin := entry.Value
@@ -176,6 +178,7 @@ func (t *Transaction) commit() {
 					Key:   ref.key,
 					Value: newValue,
 				},
+				validator: trace.validator,
 			}
 			ref.node.kvs[ref.key] = entry
 			t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue, ref.node.keyValueEntries(true))
@@ -212,12 +215,6 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 		return trace.txn, nil
 	}
 
-	trace = &txnTrace{lc: lc}
-
-	validator, hasValidator := t.Cluster.validators[key]
-	if !hasValidator {
-		return nil, ErrValidatorMissing
-	}
 	if n.cluster != t.Cluster {
 		return nil, ErrInvalidNode
 	}
@@ -232,6 +229,9 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 
 	var existing *KeyValueEntry
 	var snap *KeyValue
+
+	validator, _ := t.Cluster.validators[key]
+
 	if t.coordinator != nil {
 		latestSnap, err := t.coordinator.TransactionBeginKV(t, n, key)
 		if err != nil {
@@ -242,18 +242,29 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 			snap = latestSnap
 		}
 	}
+
 	if snap == nil {
-		// using local snapshot
+		// try local snapshot
 		if e, exists := n.kvs[key]; !exists || e == nil {
 			// new empty entry if not exist.
 			snap = &KeyValue{Key: key}
+
 		} else {
 			// lock this entry.
 			e.lock.Lock()
-			existing = e
-			snap = &e.KeyValue
+			validator, existing, snap = e.validator, e, &e.KeyValue
 		}
 	}
+
+	if validator == nil {
+		return nil, ErrValidatorMissing
+	}
+
+	trace = &txnTrace{
+		lc:        lc,
+		validator: validator,
+	}
+
 	// create entry transaction
 	if txn, err = validator.Txn(*snap); err != nil {
 		if existing != nil {
@@ -262,8 +273,7 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 		t.Cluster.log.Fatalf("validator of key \"%v\" failed to create transaction: " + err.Error())
 	}
 	// save
-	trace.txn = txn
-	t.txns[ref] = trace
+	trace.txn, t.txns[ref] = txn, trace
 
 	return
 }

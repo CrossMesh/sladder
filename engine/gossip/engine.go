@@ -37,7 +37,7 @@ func WithMinRegionPeer(min uint) sladder.EngineOption {
 	if min < 1 {
 		min = 1
 	}
-	return min
+	return minRegionPeer(min)
 }
 
 type region string
@@ -70,15 +70,30 @@ type gossipPeriod time.Duration
 // WithGossipPeriod creates option of gossip period.
 func WithGossipPeriod(t time.Duration) sladder.EngineOption { return gossipPeriod(t) }
 
+type manualSync struct{}
+
+// ManualSync disables sync.
+func ManualSync() sladder.EngineOption { return manualSync{} }
+
+type manualFailureDetect struct{}
+
+// ManualFailureDetect disables auto failure detection.
+func ManualFailureDetect() sladder.EngineOption { return manualFailureDetect{} }
+
+type manualClearSuspections struct{}
+
+// ManualClearSuspections disables auto suspections clearing.
+func ManualClearSuspections() sladder.EngineOption { return manualClearSuspections{} }
+
 // Engine provides methods to create gossip engine instance.
 type Engine struct{}
 
 // New create gossip engine instance.
-func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladder.EngineInstance {
+func New(transport Transport, options ...sladder.EngineOption) sladder.EngineInstance {
 	if transport == nil {
 		panic("transport is nil")
 	}
-	instance := newInstanceDefault()
+	instance := newInstanceDefault(transport)
 	for _, option := range options {
 		switch v := option.(type) {
 		case minRegionPeer:
@@ -101,6 +116,12 @@ func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladde
 			instance.Fanout = fanout
 		case gossipPeriod:
 			instance.GossipPeriod = time.Duration(v)
+		case manualClearSuspections:
+			instance.disableClearSuspections = true
+		case manualFailureDetect:
+			instance.disableFailureDetect = true
+		case manualSync:
+			instance.disableSync = true
 		}
 	}
 	return instance
@@ -116,12 +137,15 @@ type EngineStatistics struct {
 // EngineInstance is live gossip engine instance.
 type EngineInstance struct {
 	// parameters fields.
-	minRegionPeer  uint
-	swimTagKey     string
-	SuspectTimeout time.Duration
-	GossipPeriod   time.Duration
-	Region         string
-	Fanout         int32
+	disableSync             bool
+	disableFailureDetect    bool
+	disableClearSuspections bool
+	minRegionPeer           uint
+	swimTagKey              string
+	SuspectTimeout          time.Duration
+	GossipPeriod            time.Duration
+	Region                  string
+	Fanout                  int32
 
 	log       sladder.Logger
 	transport Transport
@@ -147,7 +171,7 @@ type EngineInstance struct {
 	statistics EngineStatistics
 }
 
-func newInstanceDefault() *EngineInstance {
+func newInstanceDefault(transport Transport) *EngineInstance {
 	return &EngineInstance{
 		SuspectTimeout: defaultSuspectTimeout,
 		minRegionPeer:  defaultMinimumRegionPeer,
@@ -163,8 +187,12 @@ func newInstanceDefault() *EngineInstance {
 		roundTrips:          make(map[*sladder.Node]time.Duration),
 		pingTimeoutEvent:    make(chan *sladder.Node, 20),
 		pingReqTimeoutEvent: make(chan *sladder.Node, 20),
+		transport:           transport,
 	}
 }
+
+// SWIMTagKey returns current SWIM Tag key name.
+func (e *EngineInstance) SWIMTagKey() string { return e.swimTagKey }
 
 func (e *EngineInstance) getGossipFanout() int32 {
 	fanout := e.Fanout
@@ -209,7 +237,7 @@ func (e *EngineInstance) selectRandomNodes(n int32, excludeSelf bool) []*sladder
 		if int32(len(nodes)) < n {
 			nodes = append(nodes, node)
 		} else if i := rand.Int31n(cnt + 1); i < n {
-			nodes[n] = node
+			nodes[i] = node
 		}
 		cnt++
 		return true
@@ -287,12 +315,16 @@ func (e *EngineInstance) onNodeRemoved(node *sladder.Node) {
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
-	if err := node.Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
-		e.removeFromRegion(tag.Region(), node, -1)
-		return false, nil
-	}).Error; err != nil {
-		e.log.Fatal("cannot start txn when remove node from region map, got " + err.Error())
-		return
+	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		r, err := t.KV(node, e.swimTagKey)
+		if err != nil {
+			e.log.Fatal("cannot access switm tag key in node removal txn from region map, got " + err.Error())
+			return false
+		}
+		e.removeFromRegion(r.(*SWIMTagTxn).Region(), node, -1)
+		return false
+	}); err != nil {
+		e.log.Warn("failed txn when remove node from region map, got " + err.Error())
 	}
 }
 
@@ -421,22 +453,35 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 	e.goClusterSync()   // start cluster sync process.
 	e.goDetectFailure() // start failure detection process.
 
+	e.arbiter.Go(func() { e.dispatchGossipMessage() })
+
 	return nil
 }
 
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
-	e.cluster.Self().Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
-		tag.Leave()
-		return true, nil
-	})
+	// change state of self node to LEAVE.
+	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		{
+			rtx, err := t.KV(e.cluster.Self(), e.swimTagKey)
+			if err != nil {
+				return false
+			}
+			e.log.Fatal("transaction get key-value failure, got " + err.Error())
+			tag := rtx.(*SWIMTagTxn)
+			tag.Leave()
+		}
+		return true
+	}); err != nil {
+		e.log.Fatal("leave transaction failure, got " + err.Error())
+		return err
+	}
 
-	waitTerm, lastSucceededTerm := 10, e.statistics.FinishedSync-e.statistics.TimeoutSyncs
+	// wait 5 gossip terms to spread the LEAVE state.
+	beginSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs
 	e.tickGossipPeriodGo(func(deadline time.Time) {
-		if waitTerm > 1 {
-			waitTerm--
-			return
-		} else if newSucceededTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs; newSucceededTerm-lastSucceededTerm < 3 {
+		newSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs
+		if newSyncTerm-beginSyncTerm < 5 {
 			return
 		}
 		e.arbiter.Shutdown()

@@ -172,7 +172,7 @@ func TestOperation(t *testing.T) {
 		// coordinator start failure.
 		rejectStart := func(*Transaction) (bool, error) { return false, nil }
 		ei.hook.start = rejectStart
-		assert.Equal(t, ErrRejectedByValidator, c.Txn(func(tx *Transaction) bool {
+		assert.Equal(t, ErrRejectedByCoordinator, c.Txn(func(tx *Transaction) bool {
 			assert.Fail(t, "should not start transaction.")
 			return false
 		}))
@@ -189,6 +189,7 @@ func TestOperation(t *testing.T) {
 		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key1").Return(nil, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key2").Return(nil, nil)
+		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key3").Return(nil, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key4").Return(nil, testError)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key5").Return(&KeyValue{
 			Key:   "key5",

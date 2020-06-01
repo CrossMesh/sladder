@@ -46,6 +46,9 @@ func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, v
 		return
 	}
 
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
 	// sync to existings
 	for _, msg := range s.Nodes {
 		names := c.resolveNodeNameFromProtobuf(msg.Kvs)
@@ -57,7 +60,7 @@ func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, v
 			if !autoNewNode {
 				continue
 			}
-			newNode, err := c.NewNode()
+			newNode, err := c.newNode()
 			if err != nil {
 				c.log.Fatal("failed to create new node to sync, got ", err.Error())
 				continue

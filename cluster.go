@@ -7,6 +7,7 @@ import (
 
 	arbit "github.com/sunmxt/arbiter"
 	"github.com/sunmxt/sladder/proto"
+	"github.com/sunmxt/sladder/util"
 )
 
 var (
@@ -343,7 +344,7 @@ func (c *Cluster) updateNodeName(n *Node, newNames []string) {
 	var mergedNames []string
 
 	// update name index.
-	rangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
+	util.RangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
 		if s != nil { // remove old name index.
 			delete(c.nodes, *s)
 		}

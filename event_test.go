@@ -44,7 +44,7 @@ func TestEvent(t *testing.T) {
 		return
 	}
 
-	c, self, err := newTestFakedCluster(TestRandomNameResolver{
+	c, self, err := newTestFakedCluster(&TestRandomNameResolver{
 		NumOfNames: 1,
 	}, nil, nil)
 	assert.NotNil(t, c)

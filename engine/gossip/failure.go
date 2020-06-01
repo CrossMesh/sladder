@@ -47,13 +47,17 @@ type pingContext struct {
 }
 
 func (e *EngineInstance) goDetectFailure() {
-	e.tickGossipPeriodGo(func(deadline time.Time) {
-		e.detectFailure()
-	})
+	if !e.disableFailureDetect {
+		e.tickGossipPeriodGo(func(deadline time.Time) {
+			e.DetectFailure()
+		})
+	}
 
-	e.tickGossipPeriodGo(func(deadline time.Time) {
-		e.clearSuspections()
-	})
+	if !e.disableClearSuspections {
+		e.tickGossipPeriodGo(func(deadline time.Time) {
+			e.ClearSuspections()
+		})
+	}
 }
 
 func (e *EngineInstance) onNodeRemovedClearFailureDetector(node *sladder.Node) {
@@ -136,7 +140,8 @@ func (e *EngineInstance) removeIfLeft(node *sladder.Node, tag *SWIMTag) {
 	e.gossipForLeaving(node)
 }
 
-func (e *EngineInstance) clearSuspections() {
+// ClearSuspections clears all expired suspection.
+func (e *EngineInstance) ClearSuspections() {
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
@@ -153,12 +158,25 @@ func (e *EngineInstance) clearSuspections() {
 		if !now.After(s.notAfter) {
 			break
 		}
-		if err := s.node.Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
+		succeed := true
+		if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 			// claim dead.
-			tag.ClaimDead()
-			return true, nil
-		}).Error; err != nil {
+			{
+				rtx, err := t.KV(s.node, e.swimTagKey)
+				if err != nil {
+					e.log.Fatal("get key-value in claiming dead transaction failure, got " + err.Error())
+					succeed = false
+					return false
+				}
+				tag := rtx.(*SWIMTagTxn)
+				tag.ClaimDead()
+			}
+			return true
+		}); err != nil {
 			e.log.Fatal("claiming dead transaction failure, got " + err.Error())
+			break
+		}
+		if !succeed {
 			break
 		}
 		deads = append(deads, s.node)
@@ -166,7 +184,8 @@ func (e *EngineInstance) clearSuspections() {
 	}
 }
 
-func (e *EngineInstance) detectFailure() {
+// DetectFailure does one failure detection process.
+func (e *EngineInstance) DetectFailure() {
 	nodes := e.selectRandomNodes(e.getGossipFanout(), true)
 	if len(nodes) < 1 {
 		return
@@ -348,11 +367,20 @@ func (e *EngineInstance) processPingReqTimeout() {
 		e.lock.Lock()
 		pingCtx, _ := e.inPing[node]
 		if pingCtx != nil { // timeout.
-			if err := node.Keys(e.swimTagKey).Txn(func(swim *SWIMTagTxn) (bool, error) {
-				swim.ClaimSuspected() // raise suspection.
-				return true, nil
-			}).Error; err != nil {
-				e.log.Fatal("txn commit failure when claims suspection, got " + err.Error())
+			// raise suspection.
+			if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+				{
+					rtx, err := t.KV(node, e.swimTagKey)
+					if err != nil {
+						e.log.Fatal("cannot get KV Txn when claiming suspection, got " + err.Error())
+						return false
+					}
+					tag := rtx.(*SWIMTagTxn)
+					tag.ClaimSuspected()
+				}
+				return true
+			}); err != nil {
+				e.log.Fatal("transaction commit failure when claiming suspection, got " + err.Error())
 			}
 		}
 		e.lock.Unlock()

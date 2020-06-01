@@ -12,9 +12,11 @@ import (
 )
 
 func (e *EngineInstance) goClusterSync() {
-	e.tickGossipPeriodGo(func(deadline time.Time) {
-		e.clusterSync()
-	})
+	if !e.disableSync {
+		e.tickGossipPeriodGo(func(deadline time.Time) {
+			e.ClusterSync()
+		})
+	}
 }
 
 func (e *EngineInstance) newSyncClusterSnapshot() *proto.Cluster {
@@ -44,7 +46,8 @@ func (e *EngineInstance) newSyncClusterSnapshot() *proto.Cluster {
 	return &snap
 }
 
-func (e *EngineInstance) clusterSync() {
+// ClusterSync does one cluster sync process.
+func (e *EngineInstance) ClusterSync() {
 	nodes := e.selectRandomNodes(e.getGossipFanout(), true)
 	if len(nodes) < 1 {
 		return

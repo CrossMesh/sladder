@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	ErrValidatorMissing    = errors.New("missing validator")
-	ErrRejectedByValidator = errors.New("operation rejected by validator")
-	ErrInvalidKeyValue     = errors.New("invalid key value pair")
+	ErrValidatorMissing      = errors.New("missing validator")
+	ErrRejectedByValidator   = errors.New("operation rejected by validator")
+	ErrRejectedByCoordinator = errors.New("operation rejected by coordinator")
+	ErrInvalidKeyValue       = errors.New("invalid key value pair")
 )
 
 // Node represents members of cluster.
@@ -100,6 +101,7 @@ func (n *Node) delete(key string) (bool, error) {
 
 // Set sets KeyValue.
 func (n *Node) Set(key, value string) error {
+	// TODO(xutao): ensure consistency between entries and node names.
 	var entry *KeyValueEntry
 	var validator KVValidator
 
@@ -108,7 +110,7 @@ func (n *Node) Set(key, value string) error {
 	entry, exists := n.kvs[key]
 	for !exists || entry == nil {
 		// lock order should be preserved to avoid deadlock.
-		// that is: acquire cluster lock, then acquire node lock.
+		// that is: acquire cluster lock first, then acquire node lock.
 		n.lock.Unlock()
 		n.cluster.lock.RLock()
 		validator, exists = n.cluster.validators[key]

@@ -2,8 +2,6 @@ package sladder
 
 import (
 	"errors"
-	"fmt"
-	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,21 +46,6 @@ func (r *MockNodeNameKVResolver) Resolve(kvs ...*KeyValue) (ids []string, err er
 	return
 }
 
-type TestRandomNameResolver struct {
-	NumOfNames int
-}
-
-func (r TestRandomNameResolver) Resolve(...*KeyValue) (ns []string, err error) {
-	for n := 0; n < r.NumOfNames; n++ {
-		ns = append(ns, fmt.Sprintf("%x", rand.Uint64()))
-	}
-	return ns, nil
-}
-
-func (r TestRandomNameResolver) Keys() []string {
-	return nil
-}
-
 func newTestFakedCluster(r NodeNameResolver, ei EngineInstance, logger Logger) (*Cluster, *Node, error) {
 	if r == nil {
 		mnr := &TestRandomNameResolver{NumOfNames: 1}
@@ -89,7 +72,7 @@ func TestCluster(t *testing.T) {
 	})
 
 	t.Run("cluster_quit", func(t *testing.T) {
-		ei, nr := &MockEngineInstance{}, TestRandomNameResolver{}
+		ei, nr := &MockEngineInstance{}, &TestRandomNameResolver{}
 		ei.On("Close").Return(nil)
 		ei.Mock.On("Init", mock.Anything).Return(error(nil))
 
@@ -232,7 +215,7 @@ func TestCluster(t *testing.T) {
 		assert.False(t, c.ContainNodes(n1))
 	})
 
-	c, self, err := newTestFakedCluster(TestRandomNameResolver{
+	c, self, err := newTestFakedCluster(&TestRandomNameResolver{
 		NumOfNames: 2,
 	}, nil, nil)
 	assert.NoError(t, err)

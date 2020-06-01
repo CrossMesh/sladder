@@ -6,7 +6,6 @@ import (
 
 // KVValidator guards consistency of KeyValue.
 type KVValidator interface {
-
 	// Sync validates given KeyValue and update local key-value entry with it.
 	Sync(*KeyValueEntry, *KeyValue) (bool, error)
 

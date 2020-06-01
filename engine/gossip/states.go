@@ -25,7 +25,7 @@ var SWIMStateNames = map[SWIMState]string{
 	ALIVE:     "alive",
 	SUSPECTED: "suspected",
 	DEAD:      "dead",
-	LEFT:      "LEFT",
+	LEFT:      "left",
 }
 
 func (s SWIMState) String() string {
@@ -54,6 +54,9 @@ func (t *SWIMTag) Encode() string {
 
 // Decode deserializes SWIMTags.
 func (t *SWIMTag) Decode(v string) error {
+	if v == "" {
+		v = "{}"
+	}
 	return json.Unmarshal([]byte(v), t)
 }
 
@@ -74,7 +77,7 @@ func (c *SWIMTagValidator) Sync(entry *sladder.KeyValueEntry, remote *sladder.Ke
 		return false, nil
 	}
 
-	if err := localTag.Decode(remote.Value); err != nil {
+	if err := localTag.Decode(entry.Value); err != nil {
 		// invalid local tag. drop it and replace with the remote.
 		c.engine.log.Warn("drop invalid local SWIM tag")
 		entry.Value = remote.Value
@@ -131,7 +134,7 @@ func (c *SWIMTagValidator) Validate(kv sladder.KeyValue) bool {
 
 // Txn begins an transaction.
 func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error) {
-	txn := &SWIMTagTxn{changed: false}
+	txn := &SWIMTagTxn{changed: false, oldRaw: x.Value}
 	if err := txn.tag.Decode(x.Value); err != nil {
 		return nil, err
 	}
@@ -142,6 +145,7 @@ func (c *SWIMTagValidator) Txn(x sladder.KeyValue) (sladder.KVTransaction, error
 // SWIMTagTxn implements SWIM tag transaction.
 type SWIMTagTxn struct {
 	tag        SWIMTag
+	oldRaw     string
 	changed    bool
 	OldVersion uint32
 }
@@ -149,11 +153,26 @@ type SWIMTagTxn struct {
 // After returns modified value.
 func (t *SWIMTagTxn) After() (bool, string) { return t.changed, t.tag.Encode() }
 
+// Before return old value.
+func (t *SWIMTagTxn) Before() string { return t.oldRaw }
+
 // Region returns region of tag snapshot
 func (t *SWIMTagTxn) Region() string { return t.tag.Region }
 
 // State returns current SWIM state.
 func (t *SWIMTagTxn) State() SWIMState { return t.tag.State }
+
+// Version returns current SWIM tag version.
+func (t *SWIMTagTxn) Version() uint32 { return t.tag.Version }
+
+// BumpVersion forces to advance tag version.
+func (t *SWIMTagTxn) BumpVersion() uint32 {
+	if t.tag.Version <= t.OldVersion {
+		t.tag.Version++
+		t.changed = true
+	}
+	return t.tag.Version
+}
 
 // ClaimDead set SWIM state to dead.
 func (t *SWIMTagTxn) ClaimDead() bool {
@@ -190,10 +209,8 @@ func (t *SWIMTagTxn) ClaimSuspected() bool {
 // ClaimAlive clears false positive and ensure SWIM state is ALIVE.
 func (t *SWIMTagTxn) ClaimAlive() bool {
 	if t.tag.State != ALIVE {
-		// clear false positive by raising version.
-		if t.tag.Version < t.OldVersion {
-			t.tag.Version++
-		}
+		// clear false positive by increasing version.
+		t.BumpVersion()
 		t.tag.State, t.changed = ALIVE, true
 		return true
 	}
@@ -214,22 +231,43 @@ func (t *SWIMTagTxn) SetRegion(region string) string {
 	old := t.tag.Region
 	if old != region {
 		t.tag.Region, t.changed = region, true
+		t.BumpVersion()
 	}
 	return old
 }
 
 func (e *EngineInstance) onSelfSWIMTagMissing(self *sladder.Node) {
-	self.Keys(e.swimTagKey).Txn(func(swim *SWIMTagTxn) (bool, error) {
-		swim.SetRegion(e.Region)
-		swim.ClaimAlive()
-		return true, nil
-	})
+	// TODO(xutao): add retry in case of failures.
+	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		{
+			rtx, err := t.KV(self, e.swimTagKey)
+			if err != nil {
+				e.log.Fatal("cannot get kv transaction when recovering from missing SWIM tag, got " + err.Error())
+				return false
+			}
+			tag := rtx.(*SWIMTagTxn)
+			tag.SetRegion(e.Region)
+			tag.ClaimAlive()
+			tag.BumpVersion()
+		}
+		return true
+	}); err != nil {
+		e.log.Fatal("cannot commit transaction when recovering from missing SWIM tag, got " + err.Error())
+	}
 }
 
 func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, old, new *SWIMTag) {
-	if new.State != ALIVE { // clear false postive.
-		self.Keys(e.swimTagKey).Txn(func(swim *SWIMTagTxn) (bool, error) {
-			return swim.ClaimAlive(), nil
-		})
+	if new.State != ALIVE {
+		// clear false postive.
+		if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+			rtx, err := t.KV(self, e.swimTagKey)
+			if err != nil {
+				e.log.Fatal("cannot get kv transaction when clearing false positives, got " + err.Error())
+				return false
+			}
+			return rtx.(*SWIMTagTxn).ClaimAlive()
+		}); err != nil {
+			e.log.Fatal("cannot commit transaction when clearing false positives, got " + err.Error())
+		}
 	}
 }

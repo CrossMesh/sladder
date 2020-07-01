@@ -62,6 +62,10 @@ func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, v
 				c.log.Fatal("failed to create new node to sync, got ", err.Error())
 				continue
 			}
+			if len(names) > 0 { // named node.
+				// update node names now to ensure consistency between node names and entries.
+				c.updateNodeName(newNode, names)
+			}
 			node = newNode
 		}
 		node.SyncFromProtobufSnapshot(msg)

@@ -7,7 +7,7 @@ import (
 // KVValidator guards consistency of KeyValue.
 type KVValidator interface {
 	// Sync validates given KeyValue and update local key-value entry with it.
-	Sync(*KeyValueEntry, *KeyValue) (bool, error)
+	Sync(*KeyValue, *KeyValue) (bool, error)
 
 	// Validate validates given KeyValue
 	Validate(KeyValue) bool
@@ -20,6 +20,12 @@ type KVValidator interface {
 type KVTransaction interface {
 	After() (bool, string) // After returns new value.
 	Before() string        // Before return origin raw value.
+}
+
+// KVTransactionWrapper wraps KVTransaction.
+type KVTransactionWrapper interface {
+	KVTransaction
+	KVTransaction() KVTransaction
 }
 
 // KeyValueEntry holds KeyValue.
@@ -50,3 +56,43 @@ func (e *KeyValue) Clone() *KeyValue {
 		Value: e.Value,
 	}
 }
+
+// StringValidator implements basic string KV.
+type StringValidator struct{}
+
+// Sync syncs string KV.
+func (v StringValidator) Sync(lr, rr *KeyValue) (bool, error) {
+	if lr == nil {
+		return false, nil
+	}
+	if rr == nil {
+		return true, nil
+	}
+	lr.Value = rr.Value
+	return true, nil
+}
+
+// Validate validates string KV.
+func (v StringValidator) Validate(KeyValue) bool { return true }
+
+// StringTxn implements string KV transaction.
+type StringTxn struct {
+	origin, new string
+}
+
+// Txn begins a KV transaction.
+func (v StringValidator) Txn(x KeyValue) (KVTransaction, error) {
+	return &StringTxn{origin: x.Value, new: x.Value}, nil
+}
+
+// After returns new string.
+func (t *StringTxn) After() (bool, string) { return t.origin != t.new, t.new }
+
+// Before returns origin string.
+func (t *StringTxn) Before() string { return t.origin }
+
+// Get returns current string.
+func (t *StringTxn) Get() string { return t.new }
+
+// Set sets new string.
+func (t *StringTxn) Set(x string) { t.new = x }

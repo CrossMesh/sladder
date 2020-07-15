@@ -166,7 +166,7 @@ type EngineInstance struct {
 	pingTimeoutEvent    chan *sladder.Node              // ping timeout event.
 	pingReqTimeoutEvent chan *sladder.Node              // ping-req timeout event.
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
-	suspectionQueue     suspectionQueue                 // heap order by by suspection.notAfter.
+	suspectionQueue     suspectionQueue                 // heap order by suspection.notAfter.
 
 	statistics EngineStatistics
 }

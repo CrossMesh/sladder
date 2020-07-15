@@ -77,18 +77,31 @@ func RemoveStringSortedSet(s []string, rs ...string) []string {
 				}
 				p++
 				b++
-			} else if s[b] != rs[r] { // s[b] > rs[r]
+			} else if s[b] > rs[r] {
 				r++
+			} else { // s[b] == rs[r]
+				b++ // remove
 			}
 		} else if p == b {
-			// nothing removed.
+			// fast path: nothing removed. stop now.
 			b = len(s)
 			p = b
 		} else {
+			// compact.
 			s[p] = s[b]
 			p++
 			b++
 		}
 	}
 	return s[:p]
+}
+
+// AddStringSortedSet add specific values to the set.
+func AddStringSortedSet(s []string, rs ...string) []string {
+	sort.Strings(rs)
+	RangeOverStringSortedSet(s, rs, nil, func(ns *string) bool {
+		s = append(s, *ns)
+		return true
+	}, nil)
+	return s
 }

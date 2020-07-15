@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -106,6 +107,67 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
+	// refine messages.
+	eliNodeIdx, nIdx := 0, 0
+	for nIdx < len(sync.Cluster.Nodes) {
+		pn := sync.Cluster.Nodes[nIdx]
+
+		var tag *SWIMTag = nil
+
+		eliIdx, Idx, eIdx, reject := 0, 0, 0, false
+		sort.Slice(pn.Kvs, func(i, j int) bool { return pn.Kvs[i].Key < pn.Kvs[j].Key })
+
+		for Idx < len(pn.Kvs) {
+			kv := pn.Kvs[Idx]
+			if tag == nil {
+				if kv.Key == e.swimTagKey {
+					// find entry list first.
+					t := &SWIMTag{}
+					if err := t.Decode(pn.Kvs[Idx].Value); err != nil {
+						e.log.Warn("drop a node with invalid swim tag in sync message. decode err = \"%v\"." + err.Error())
+						reject = true
+					} else {
+						tag = t
+					}
+					Idx, eliIdx = 0, 0
+					continue
+				}
+
+				Idx++
+
+			} else {
+				// filter entries.
+				if eIdx < len(tag.EntryList[eIdx]) {
+					if kv.Key < tag.EntryList[eIdx] {
+						// drop entry as key is not in entry list.
+						Idx++
+
+					} else if kv.Key == tag.EntryList[eIdx] || kv.Key == e.swimTagKey {
+						// accept
+						pn.Kvs[eliIdx] = pn.Kvs[Idx]
+						eliIdx++
+						Idx++
+
+					} else {
+						eIdx++
+					}
+				} else {
+					break
+				}
+			}
+		}
+		if tag != nil {
+			pn.Kvs = pn.Kvs[:eliIdx]
+		}
+
+		if !reject {
+			sync.Cluster.Nodes[eliNodeIdx] = sync.Cluster.Nodes[nIdx]
+			eliNodeIdx++
+		}
+		nIdx++
+	}
+	sync.Cluster.Nodes = sync.Cluster.Nodes[:eliNodeIdx]
+
 	e.cluster.SyncFromProtobufSnapshot(sync.Cluster, true, func(node *sladder.Node, kvs []*proto.Node_KeyValue) bool {
 		for _, kv := range kvs {
 			if kv.Key != e.swimTagKey {
@@ -113,7 +175,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			}
 			tag := &SWIMTag{}
 			if err := tag.Decode(kv.Value); err != nil {
-				e.log.Warn("drop a node with invalid swim tag in sync message. decode got: " + err.Error())
+				e.log.Warn("drop a node with invalid swim tag in sync message. decode err = \"%v\"." + err.Error())
 				return false
 			}
 			if (tag.State == DEAD || tag.State == LEFT) && node == nil {
@@ -123,7 +185,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			break
 		}
 		return true
-	})
+	}, nil)
 
 	if _, inSync := e.inSync[sync.Id]; inSync {
 		delete(e.inSync, sync.Id)

@@ -91,7 +91,7 @@ func (t *TestNamesInKeyTxn) Before() string { return t.origin }
 
 type TestNamesInKeyIDValidator struct{}
 
-func (v *TestNamesInKeyIDValidator) Sync(entry *KeyValueEntry, remote *KeyValue) (accepted bool, err error) {
+func (v *TestNamesInKeyIDValidator) Sync(entry *KeyValue, remote *KeyValue) (accepted bool, err error) {
 	if remote == nil {
 		return false, nil
 	}

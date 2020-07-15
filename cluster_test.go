@@ -161,8 +161,8 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, n1)
 
 		// add ids.
-		self.Set("id1", "ea309")
-		self.Set("id2", "ea307")
+		self._set("id1", "ea309")
+		self._set("id2", "ea307")
 		c.EventBarrier()
 		assert.Equal(t, 2, len(self.Names()))
 		assert.Contains(t, self.names, "ea309")
@@ -171,9 +171,9 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea307"))
 
 		// id changes.
-		self.Set("id1", "ea388")
-		self.Set("id2", "ea381")
-		self.Set("id3", "ea389")
+		self._set("id1", "ea388")
+		self._set("id2", "ea381")
+		self._set("id3", "ea389")
 		c.EventBarrier()
 		assert.Equal(t, 3, len(self.Names()))
 		assert.Contains(t, self.names, "ea388")
@@ -184,8 +184,8 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea381"))
 
 		// reject duplated name.
-		n1.Set("id1", "ea389")
-		n1.Set("id2", "ea008")
+		n1._set("id1", "ea389")
+		n1._set("id2", "ea008")
 		c.EventBarrier()
 		assert.Equal(t, 1, len(n1.Names()))
 		assert.Contains(t, n1.names, "ea008")
@@ -228,39 +228,39 @@ func TestCluster(t *testing.T) {
 
 	t.Run("test_register_key", func(t *testing.T) {
 		assert.NoError(t, c.RegisterKey("key1", nil, false, 0)) // dummy
-		assert.Error(t, ErrValidatorMissing, self.Set("key1", "v1"))
+		assert.Error(t, ErrValidatorMissing, self._set("key1", "v1"))
 
 		assert.NoError(t, c.RegisterKey("key1", model1, false, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		assert.Nil(t, self.Set("key1", "v2"))
+		assert.Nil(t, self._set("key1", "v1"))
+		assert.Nil(t, self._set("key1", "v2"))
 
 		// common test.
-		entry := self.get("key1")
+		entry := self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model1, entry.validator)
 
 		assert.NoError(t, c.RegisterKey("key1", model3, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model3, entry.validator)
 
 		assert.Equal(t, ErrIncompatibleValidator, c.RegisterKey("key1", model2, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model3, entry.validator)
 
 		assert.NoError(t, c.RegisterKey("key1", model2, true, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.Nil(t, entry)
 
 		// removal.
 		assert.NoError(t, c.RegisterKey("key1", model1, true, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		entry = self.get("key1")
+		assert.Nil(t, self._set("key1", "v1"))
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model1, entry.validator)
 		assert.NoError(t, c.RegisterKey("key1", nil, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.Nil(t, entry)
 	})
 
@@ -317,8 +317,8 @@ func TestCluster(t *testing.T) {
 		})).Return(false)
 
 		assert.NoError(t, c.RegisterKey("key1", model1, false, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		assert.Nil(t, n.Set("key1", "v2"))
+		assert.Nil(t, self._set("key1", "v1"))
+		assert.Nil(t, n._set("key1", "v2"))
 		entry1, entry2 := self.get("key1"), n.get("key1")
 		assert.NotNil(t, entry1)
 		assert.NotNil(t, entry2)
@@ -398,7 +398,7 @@ func TestCluster(t *testing.T) {
 		}
 		for node, kvs := range nodeToKV {
 			for key, value := range kvs {
-				assert.NoError(t, node.Set(key, value))
+				assert.NoError(t, node._set(key, value))
 			}
 		}
 

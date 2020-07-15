@@ -262,7 +262,7 @@ func (c *Cluster) replaceValidator(key string, validator KVValidator, forceRepla
 		node.lock.Lock()
 		defer node.lock.Unlock()
 
-		entry := node.get(key)
+		entry := node.getEntry(key)
 		if entry == nil {
 			continue
 		}
@@ -274,7 +274,7 @@ func (c *Cluster) replaceValidator(key string, validator KVValidator, forceRepla
 
 	// replace for all entry.
 	for node := range nodeSet {
-		entry := node.get(key)
+		entry := node.getEntry(key)
 		if entry == nil {
 			continue
 		}

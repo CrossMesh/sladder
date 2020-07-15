@@ -41,25 +41,25 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.False(t, ok)
 	}
 	{
-		ok, err := v.Sync(&sladder.KeyValueEntry{}, nil)
+		ok, err := v.Sync(&sladder.KeyValue{}, nil)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
 	{
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: "mk",
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: ""})
 		assert.NoError(t, err)
 		assert.True(t, ok)
 		assert.Equal(t, "", e.Value)
 	}
 	{
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: "mk",
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: "kk"})
 		assert.NoError(t, err)
 		assert.False(t, ok)
@@ -73,10 +73,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 2, State: ALIVE, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -89,10 +89,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 2, State: ALIVE, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.False(t, ok)
@@ -106,10 +106,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: SUSPECTED, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -127,10 +127,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: ALIVE, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.False(t, ok)
@@ -148,10 +148,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: DEAD, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -168,10 +168,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: DEAD, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -189,10 +189,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: LEFT, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -209,10 +209,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: LEFT, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -229,10 +229,10 @@ func TestSWIMTagValidator(t *testing.T) {
 		new := (&SWIMTag{
 			Version: 3, State: LEFT, Region: "region1",
 		}).Encode()
-		e := &sladder.KeyValueEntry{KeyValue: sladder.KeyValue{
+		e := &sladder.KeyValue{
 			Key:   "tst",
 			Value: old,
-		}}
+		}
 		ok, err := v.Sync(e, &sladder.KeyValue{Key: "tst", Value: new})
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -517,6 +517,52 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(4), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region3", txn.Region())
+		changed, _ := txn.After()
+		assert.True(t, changed)
+	}
+	// Entry List.
+	{
+		old := (&SWIMTag{
+			Version: 3, State: ALIVE, Region: "region2",
+		}).Encode()
+		rtx, err := v.Txn(sladder.KeyValue{
+			Key: "r", Value: old,
+		})
+		assert.NoError(t, err)
+		txn := rtx.(*SWIMTagTxn)
+		txn.AddToEntryList()
+		txn.AddToEntryList("1", "2", "3")
+		txn.AddToEntryList("1", "2", "3")
+		txn.AddToEntryList("1", "2", "3")
+		assert.Equal(t, uint32(4), txn.Version())
+		assert.Equal(t, 3, len(txn.EntryList(false)))
+		assert.Contains(t, txn.EntryList(false), "1")
+		assert.Contains(t, txn.EntryList(false), "2")
+		assert.Contains(t, txn.EntryList(false), "3")
+		assert.Equal(t, ALIVE, txn.State())
+		changed, _ := txn.After()
+		assert.True(t, changed)
+	}
+	{
+		old := (&SWIMTag{
+			Version: 3, State: ALIVE, Region: "region2", EntryList: []string{"1", "2", "3", "dd", "cc", "ee"},
+		}).Encode()
+		rtx, err := v.Txn(sladder.KeyValue{
+			Key: "r", Value: old,
+		})
+		assert.NoError(t, err)
+		txn := rtx.(*SWIMTagTxn)
+		txn.RemoveFromEntryList()
+		txn.RemoveFromEntryList("dd", "cc")
+		txn.RemoveFromEntryList("dd", "cc")
+		txn.RemoveFromEntryList("dd", "cc", "ee")
+		txn.RemoveFromEntryList("ee")
+		assert.Equal(t, uint32(4), txn.Version())
+		assert.Equal(t, 3, len(txn.EntryList(false)))
+		assert.Contains(t, txn.EntryList(false), "1")
+		assert.Contains(t, txn.EntryList(false), "2")
+		assert.Contains(t, txn.EntryList(false), "3")
+		assert.Equal(t, ALIVE, txn.State())
 		changed, _ := txn.After()
 		assert.True(t, changed)
 	}

@@ -151,9 +151,9 @@ func TestSync(t *testing.T) {
 				},
 			},
 		}
-		self.Set("id1", "n0-1")
-		self.Set("id2", "n0-2")
-		self.Set("id3", "n0-3")
+		self._set("id1", "n0-1")
+		self._set("id2", "n0-2")
+		self._set("id3", "n0-3")
 
 		t.Run("test_resolve_from_pb", func(t *testing.T) {
 			names := c.resolveNodeNameFromProtobuf(cpb.Nodes[0].Kvs)
@@ -169,11 +169,11 @@ func TestSync(t *testing.T) {
 		})
 
 		t.Run("test_sync_auto_new_node", func(t *testing.T) {
-			c.SyncFromProtobufSnapshot(nil, true, nil)
+			c.SyncFromProtobufSnapshot(nil, true, nil, nil)
 			c.SyncFromProtobufSnapshot(cpb, true, func(pn *Node, raw []*proto.Node_KeyValue) bool {
 				assert.Nil(t, pn)
 				return true
-			})
+			}, nil)
 			c.EventBarrier()
 			n11 := c.GetNode("n1-1")
 			n12 := c.GetNode("n1-2")
@@ -188,7 +188,7 @@ func TestSync(t *testing.T) {
 			c.SyncFromProtobufSnapshot(cpb, true, func(pn *Node, raw []*proto.Node_KeyValue) bool {
 				assert.NotNil(t, pn)
 				return true
-			})
+			}, nil)
 
 			// no autonew.
 			cpb2 := &proto.Cluster{
@@ -203,7 +203,7 @@ func TestSync(t *testing.T) {
 					},
 				},
 			}
-			c.SyncFromProtobufSnapshot(cpb2, false, nil)
+			c.SyncFromProtobufSnapshot(cpb2, false, nil, nil)
 			c.EventBarrier()
 			assert.Nil(t, c.GetNode("n3-1"))
 			assert.Nil(t, c.GetNode("n3-2"))
@@ -218,7 +218,7 @@ func TestSync(t *testing.T) {
 					}
 				}
 				return true
-			})
+			}, nil)
 			c.EventBarrier()
 			assert.Nil(t, c.GetNode("n3-1"))
 			assert.Nil(t, c.GetNode("n3-2"))

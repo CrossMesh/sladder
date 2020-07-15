@@ -41,7 +41,10 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) []
 }
 
 // SyncFromProtobufSnapshot sync cluster states by refering to protobuf snapshot.
-func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, validate func(*Node, []*proto.Node_KeyValue) bool) {
+func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool,
+	validate func(*Node, []*proto.Node_KeyValue) bool,
+	validateEntry func(*Node, *KeyValue, *proto.Node_KeyValue) bool,
+) {
 	if s == nil {
 		return
 	}
@@ -52,6 +55,9 @@ func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, v
 	// sync to existings
 	for _, msg := range s.Nodes {
 		names := c.resolveNodeNameFromProtobuf(msg.Kvs)
+		if len(names) < 1 { // skip syncing anonymous empty node.
+			continue
+		}
 		node := c.mostPossibleNode(names)
 		if validate != nil && !validate(node, msg.Kvs) {
 			continue
@@ -91,9 +97,9 @@ func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
 		var err error
 
 		if msgKV == nil {
-			accepted, err = entry.validator.Sync(entry, nil)
+			accepted, err = entry.validator.Sync(&entry.KeyValue, nil)
 		} else {
-			accepted, err = entry.validator.Sync(entry, &KeyValue{
+			accepted, err = entry.validator.Sync(&entry.KeyValue, &KeyValue{
 				Key:   msgKV.Key,
 				Value: msgKV.Value,
 			})

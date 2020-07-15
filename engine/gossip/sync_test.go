@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"math/rand"
 	"strconv"
 	"testing"
 	"time"
@@ -22,9 +23,17 @@ func TestGossipEngineSync(t *testing.T) {
 	})
 
 	vps := god.VPList()
+	for _, vp := range vps {
+		m := vp.engine.WrapVersionKVValidator(sladder.StringValidator{})
+		assert.NoError(t, vp.cv.RegisterKey("key1", m, true, 0))
+		assert.NoError(t, vp.cv.RegisterKey("key2", m, true, 0))
+		assert.NoError(t, vp.cv.RegisterKey("key3", m, true, 0))
+	}
+
 	// seed
 	for i := 1; i < len(vps); i++ {
 		vp, nvp := vps[i-1], vps[i]
+
 		n, err := vp.cv.NewNode()
 		assert.NoError(t, err)
 		if !assert.NoError(t, err) {
@@ -56,7 +65,7 @@ func TestGossipEngineSync(t *testing.T) {
 			for _, vp := range vps {
 				vp.engine.ClusterSync()
 			}
-			time.Sleep(time.Microsecond)
+			time.Sleep(time.Microsecond * 2)
 			for _, vp := range vps {
 				vp.cv.EventBarrier()
 				nodeNames := []interface{}{}
@@ -73,9 +82,25 @@ func TestGossipEngineSync(t *testing.T) {
 			}
 			i++
 		}
-		assert.Less(t, i, maxTimes, "node list cannot be consistency within "+strconv.FormatInt(int64(maxTimes), 10)+"times.")
+		assert.Less(t, i, maxTimes, "node list cannot be consistency within "+strconv.FormatInt(int64(maxTimes), 10)+" rounds.")
 	})
 
 	t.Run("key_value_sync", func(t *testing.T) {
+		vp := vps[rand.Intn(len(vps))]
+		vp.cv.Txn(func(tx *sladder.Transaction) bool {
+			{
+				rtx, err := tx.KV(vp.cv.Self(), "key1")
+				assert.NoError(t, err)
+				if err != nil {
+					return false
+				}
+				txn := rtx.(*sladder.StringTxn)
+				txn.Set("3")
+			}
+			return true
+		})
+		for _, v := range vp.cv.Self().KeyValueEntries(true) {
+			t.Log(v)
+		}
 	})
 }

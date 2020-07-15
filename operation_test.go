@@ -35,7 +35,7 @@ func (v *MockKVTransactionValidator) DelateFailKey(key string) {
 	delete(v.SyncFailKeyMap, key)
 }
 
-func (v *MockKVTransactionValidator) Sync(e *KeyValueEntry, kv *KeyValue) (bool, error) {
+func (v *MockKVTransactionValidator) Sync(e *KeyValue, kv *KeyValue) (bool, error) {
 	if e == nil {
 		return false, nil
 	}
@@ -45,8 +45,8 @@ func (v *MockKVTransactionValidator) Sync(e *KeyValueEntry, kv *KeyValue) (bool,
 		}
 	}
 	if kv != nil {
-		e.KeyValue.Key = kv.Key
-		e.KeyValue.Value = kv.Value
+		e.Key = kv.Key
+		e.Value = kv.Value
 	}
 	return true, nil
 }

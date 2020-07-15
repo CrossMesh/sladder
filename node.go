@@ -32,6 +32,9 @@ func newNode(cluster *Cluster) *Node {
 	}
 }
 
+// Anonymous checks whether node is anonymous.
+func (n *Node) Anonymous() bool { return len(n.names) < 1 }
+
 // Names returns name set.
 func (n *Node) Names() (names []string) {
 	n.lock.Lock()
@@ -82,11 +85,11 @@ func (n *Node) Delete(key string) (bool, error) {
 }
 
 func (n *Node) delete(key string) (bool, error) {
-	entry := n.get(key)
+	entry := n.getEntry(key)
 	if entry == nil {
 		return false, nil
 	}
-	accepted, err := entry.validator.Sync(entry, nil)
+	accepted, err := entry.validator.Sync(&entry.KeyValue, nil)
 	if err != nil {
 		return false, err
 	}
@@ -100,7 +103,7 @@ func (n *Node) delete(key string) (bool, error) {
 }
 
 // Set sets KeyValue.
-func (n *Node) Set(key, value string) error {
+func (n *Node) _set(key, value string) error {
 	// TODO(xutao): ensure consistency between entries and node names.
 	var entry *KeyValueEntry
 	var validator KVValidator
@@ -189,9 +192,17 @@ func (n *Node) ProtobufSnapshot(message *proto.Node) {
 	n.protobufSnapshot(message)
 }
 
-func (n *Node) get(key string) (entry *KeyValueEntry) {
+func (n *Node) getEntry(key string) (entry *KeyValueEntry) {
 	entry, _ = n.kvs[key]
 	return
+}
+
+func (n *Node) get(key string) (entry *KeyValue) {
+	e := n.getEntry(key)
+	if e == nil {
+		return nil
+	}
+	return &e.KeyValue
 }
 
 func (n *Node) replaceValidatorForce(key string, validator KVValidator) {

@@ -2,8 +2,10 @@ package gossip
 
 import (
 	"encoding/json"
+	"sort"
 
 	"github.com/sunmxt/sladder"
+	"github.com/sunmxt/sladder/util"
 )
 
 const (
@@ -38,9 +40,10 @@ func (s SWIMState) String() string {
 
 // SWIMTag represents node gossip tag.
 type SWIMTag struct {
-	Version uint32    `json:"v,omitempty"`
-	State   SWIMState `json:"s,omitempty"`
-	Region  string    `json:"r,omitempty"`
+	Version   uint32    `json:"v,omitempty"`
+	State     SWIMState `json:"s,omitempty"`
+	Region    string    `json:"r,omitempty"`
+	EntryList []string  `json:"l,omitempty"`
 }
 
 // Encode serializes SWIMTags.
@@ -57,7 +60,11 @@ func (t *SWIMTag) Decode(v string) error {
 	if v == "" {
 		v = "{}"
 	}
-	return json.Unmarshal([]byte(v), t)
+	if err := json.Unmarshal([]byte(v), t); err != nil {
+		return err
+	}
+	sort.Strings(t.EntryList)
+	return nil
 }
 
 // SWIMTagValidator validates SWIMTags.
@@ -66,7 +73,7 @@ type SWIMTagValidator struct {
 }
 
 // Sync synchronizes SWIMTag
-func (c *SWIMTagValidator) Sync(entry *sladder.KeyValueEntry, remote *sladder.KeyValue) (bool, error) {
+func (c *SWIMTagValidator) Sync(entry *sladder.KeyValue, remote *sladder.KeyValue) (bool, error) {
 	if remote == nil {
 		return false, nil
 	}
@@ -165,6 +172,38 @@ func (t *SWIMTagTxn) State() SWIMState { return t.tag.State }
 // Version returns current SWIM tag version.
 func (t *SWIMTagTxn) Version() uint32 { return t.tag.Version }
 
+// AddToEntryList add valid entries to entry list.
+func (t *SWIMTagTxn) AddToEntryList(keys ...string) {
+	if len(keys) < 0 {
+		return
+	}
+	if new := util.AddStringSortedSet(t.tag.EntryList, keys...); len(new) != len(t.tag.EntryList) {
+		t.BumpVersion()
+		t.tag.EntryList = new
+	}
+}
+
+// RemoveFromEntryList add valid entries to entry list.
+func (t *SWIMTagTxn) RemoveFromEntryList(keys ...string) {
+	if len(keys) < 0 {
+		return
+	}
+	sort.Strings(t.tag.EntryList)
+	if new := util.RemoveStringSortedSet(t.tag.EntryList, keys...); len(new) != len(t.tag.EntryList) {
+		t.BumpVersion()
+		t.tag.EntryList = new
+	}
+}
+
+// EntryList returns valid entry key.
+func (t *SWIMTagTxn) EntryList(clone bool) (l []string) {
+	if !clone {
+		return t.tag.EntryList
+	}
+	l = append(l, t.tag.EntryList...)
+	return
+}
+
 // BumpVersion forces to advance tag version.
 func (t *SWIMTagTxn) BumpVersion() uint32 {
 	if t.tag.Version <= t.OldVersion {
@@ -234,6 +273,41 @@ func (t *SWIMTagTxn) SetRegion(region string) string {
 		t.BumpVersion()
 	}
 	return old
+}
+
+func (e *EngineInstance) tagTraceTransactionCommit(t *sladder.Transaction, rcs []*sladder.KVTransactionRecord) (accepted bool, err error) {
+	addList, removeList := []string{}, []string{}
+
+	self := e.cluster.Self()
+	for idx := 0; idx < len(rcs); idx++ {
+		rc := rcs[idx]
+		if self == rc.Node && (rc.Delete || rc.New) && rc.Key != e.swimTagKey {
+			switch {
+			case rc.New:
+				addList = append(addList, rc.Key)
+			case rc.Delete:
+				removeList = append(removeList, rc.Key)
+			}
+		}
+	}
+	if len(addList)+len(removeList) > 0 {
+		rtx, err := t.KV(self, e.swimTagKey)
+		if err != nil {
+			e.log.Fatalf("engine cannot update entry list in swim tag. err = \"%v\"", err)
+			return false, err
+		}
+		swim := rtx.(*SWIMTagTxn)
+		if len(addList) > 0 {
+			sort.Strings(addList)
+			swim.AddToEntryList(addList...)
+		}
+		if len(removeList) > 0 {
+			sort.Strings(removeList)
+			swim.RemoveFromEntryList(removeList...)
+		}
+	}
+
+	return true, nil
 }
 
 func (e *EngineInstance) onSelfSWIMTagMissing(self *sladder.Node) {

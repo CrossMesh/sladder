@@ -156,8 +156,12 @@ type EngineInstance struct {
 
 	withRegion map[string]map[*sladder.Node]struct{}
 
+	// txn fields.
+	innerTxnIDs sync.Map // map[uint32]struct{}
+
 	// sync fields.
-	inSync       map[uint64]struct{}
+	syncCounter  uint64
+	inSync       sync.Map                   // map[uint64]struct{}
 	leavingNodes map[*sladder.Node]struct{} // leaving nodes.
 
 	// failure detector fields
@@ -180,8 +184,6 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 		log:            sladder.DefaultLogger,
 		GossipPeriod:   defaultGossipPeriod,
 		Fanout:         1,
-
-		inSync: make(map[uint64]struct{}),
 
 		inPing:              make(map[*sladder.Node]*pingContext),
 		roundTrips:          make(map[*sladder.Node]time.Duration),

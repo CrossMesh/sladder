@@ -16,10 +16,25 @@ type KVValidator interface {
 	Txn(KeyValue) (KVTransaction, error)
 }
 
+// KVMergingProperties contains extra properties for merging.
+type KVMergingProperties interface {
+	// Concurrent indicates that the new conflicts with the existing one.
+	Concurrent() bool
+
+	Get(string) interface{}
+}
+
+// KVExtendedSyncer merges remote entry with extended merging properties.
+type KVExtendedSyncer interface {
+	SyncEx(*KeyValue, *KeyValue, KVMergingProperties) (bool, error)
+}
+
 // KVTransaction implements atomic operation.
 type KVTransaction interface {
-	After() (bool, string) // After returns new value.
-	Before() string        // Before return origin raw value.
+	// TODO(xutao): seperate 'updated' and 'newValue'
+	After() (bool, string)    // After returns new value.
+	Before() string           // Before return origin raw value.
+	SetRawValue(string) error // SetRawValue set new raw value.
 }
 
 // KVTransactionWrapper wraps KVTransaction.
@@ -60,6 +75,16 @@ func (e *KeyValue) Clone() *KeyValue {
 // StringValidator implements basic string KV.
 type StringValidator struct{}
 
+// SyncEx syncs string KV refering to properties.
+func (v StringValidator) SyncEx(lr, rr *KeyValue, props KVMergingProperties) (bool, error) {
+	if props.Concurrent() && lr != nil && rr != nil {
+		if rr.Value > lr.Value {
+			lr.Value = rr.Value
+		}
+	}
+	return v.Sync(lr, rr)
+}
+
 // Sync syncs string KV.
 func (v StringValidator) Sync(lr, rr *KeyValue) (bool, error) {
 	if lr == nil {
@@ -96,3 +121,6 @@ func (t *StringTxn) Get() string { return t.new }
 
 // Set sets new string.
 func (t *StringTxn) Set(x string) { t.new = x }
+
+// SetRawValue sets new string.
+func (t *StringTxn) SetRawValue(x string) error { t.Set(x); return nil }

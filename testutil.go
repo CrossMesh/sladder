@@ -89,6 +89,21 @@ func (t *TestNamesInKeyTxn) After() (changed bool, new string) {
 
 func (t *TestNamesInKeyTxn) Before() string { return t.origin }
 
+func (t *TestNamesInKeyTxn) SetRawValue(x string) error {
+	newTag := TestNamesInKeyTag{}
+	if x == "" {
+		x = "{}"
+	}
+	if err := json.Unmarshal([]byte(x), &newTag); err != nil {
+		return err
+	}
+	t.changed = t.origin != x
+	sort.Strings(newTag.Names)
+	t.tag = newTag
+
+	return nil
+}
+
 type TestNamesInKeyIDValidator struct{}
 
 func (v *TestNamesInKeyIDValidator) Sync(entry *KeyValue, remote *KeyValue) (accepted bool, err error) {

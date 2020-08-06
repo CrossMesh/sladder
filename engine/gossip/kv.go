@@ -2,28 +2,128 @@ package gossip
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
+	"sort"
 
 	"github.com/sunmxt/sladder"
+	"github.com/sunmxt/sladder/util"
 )
 
-var (
-	// ErrTransactionCommitViolation raises when any operation breaks commit limitation.
-	ErrTransactionCommitViolation = errors.New("modification violation in transactiom commit")
-)
+func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, isEngineTxn bool, ops []*sladder.TransactionOperation) (bool, error) {
+	if len(ops) < 1 {
+		return true, nil
+	}
 
-func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, rcs []*sladder.KVTransactionRecord) (bool, error) {
-	for _, rc := range rcs {
-		if e.cluster.Self() != rc.Node && (rc.New || rc.Delete) && !rc.Node.Anonymous() {
-			return false, ErrTransactionCommitViolation
+	type nodeOpMeta struct {
+		swim   *SWIMTagTxn
+		oldTag *SWIMTag
+	}
+
+	metas := make(map[*sladder.Node]*nodeOpMeta)
+	self := t.Cluster.Self()
+
+	// enforce SWIM tag modification rules.
+	for _, op := range ops {
+		if op.Txn == nil { // ignore node operation.
+			continue
+		}
+
+		meta, _ := metas[op.Node]
+		if meta == nil {
+			meta = &nodeOpMeta{}
+			metas[op.Node] = meta
+		}
+		if op.Key == e.swimTagKey {
+			rtx, err := t.KV(op.Node, e.swimTagKey)
+			if err != nil {
+				e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
+				return false, err
+			}
+			meta.swim = rtx.(*SWIMTagTxn)
+			meta.oldTag = &SWIMTag{}
+			if err := meta.oldTag.Decode(meta.swim.Before()); err != nil {
+				e.log.Fatalf("failed to decode old SWIM tag. (err = \"%v\")", err)
+				return false, err
+			}
+
+			if !op.Node.Anonymous() && // no rule for anonymous node
+				!isEngineTxn && // engine coordinator is allowed to do any operation.
+				self != op.Node { // self can apply any operation.
+				if op.PastExists == op.Exists {
+					if op.Updated { // seem to be modified.
+						modified := len(meta.swim.EntryList(false)) != len(meta.oldTag.EntryList)
+						if !modified {
+							// rule: modification of entry list is not allowed.
+							mark := func(s *string) bool { modified = true; return true }
+							util.RangeOverStringSortedSet(meta.swim.EntryList(false), meta.oldTag.EntryList, mark, mark, nil)
+						}
+						if modified {
+							return false, sladder.ErrTransactionCommitViolation
+						}
+					}
+				} else { // delete or new.
+					return false, sladder.ErrTransactionCommitViolation
+				}
+			}
+
 		}
 	}
+
+	// enforce entry rules.
+	for node, meta := range metas {
+		if node == self || // exclude self.
+			!node.Anonymous() { // no rule for anonymous node
+			continue
+		}
+
+		var allowedKeys []string
+		var passiveDeletedKeys []string
+		var swim *SWIMTagTxn
+
+		if meta.swim == nil {
+			rtx, err := t.KV(node, e.swimTagKey)
+			if err != nil {
+				e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
+				return false, err
+			}
+			swim = rtx.(*SWIMTagTxn)
+		} else {
+			swim = meta.swim
+		}
+		allowedKeys = swim.EntryList(false)
+
+		rejectKey := ""
+		t.RangeNodeKeys(node, func(key string, pastExists bool) bool {
+			if key == e.swimTagKey {
+				return true
+			}
+			if sort.SearchStrings(allowedKeys, key) < 0 { // forbidden key.
+				if pastExists { // passive deletion.
+					passiveDeletedKeys = append(passiveDeletedKeys, key)
+				} else { // user deletion. reject it.
+					rejectKey = key
+					return false
+				}
+			}
+			return true
+		})
+		if rejectKey != "" { // user add invalid key.
+			return false, fmt.Errorf("%v. {key = \"%v\", node = \"%v\"}", sladder.ErrTransactionCommitViolation, rejectKey, node.PrintableName())
+		}
+
+		// deal with passive deletions.
+		for _, key := range passiveDeletedKeys {
+			t.Delete(node, key)
+		}
+	}
+
 	return true, nil
 }
 
 type wrapVersionKVValidator struct {
-	log sladder.Logger
-	ov  sladder.KVValidator
+	log            sladder.Logger
+	ov             sladder.KVValidator
+	extendedSyncer sladder.KVExtendedSyncer
 }
 
 // WrapVersionKVValidator wraps existing validator to make versioned data model.
@@ -31,9 +131,11 @@ func WrapVersionKVValidator(v sladder.KVValidator, log sladder.Logger) sladder.K
 	if log == nil {
 		log = sladder.DefaultLogger
 	}
+	syncer, _ := v.(sladder.KVExtendedSyncer)
 	return wrapVersionKVValidator{
-		ov:  v,
-		log: log,
+		ov:             v,
+		log:            log,
+		extendedSyncer: syncer,
 	}
 }
 
@@ -62,6 +164,13 @@ func (v *wrapVersionKV) Decode(x string) error {
 	return json.Unmarshal([]byte(x), v)
 }
 
+type wrapVersionKVSyncProperties struct {
+	isConcurrent bool
+}
+
+func (p *wrapVersionKVSyncProperties) Concurrent() bool           { return p.isConcurrent }
+func (p *wrapVersionKVSyncProperties) Get(key string) interface{} { return nil }
+
 type wrapVersionKVTxn struct {
 	origin wrapVersionKV
 	o      sladder.KVTransaction
@@ -88,6 +197,19 @@ func (t *wrapVersionKVTxn) Before() string {
 	return ori
 }
 
+func (t *wrapVersionKVTxn) SetRawValue(x string) error {
+	tag := wrapVersionKV{}
+	if err := tag.Decode(x); err != nil {
+		return err
+	}
+	if err := t.o.SetRawValue(tag.Value); err != nil {
+		return err
+	}
+	t.origin = tag
+
+	return nil
+}
+
 func (t *wrapVersionKVTxn) KVTransaction() sladder.KVTransaction { return t.o }
 
 func (v wrapVersionKVValidator) Sync(lr *sladder.KeyValue, rr *sladder.KeyValue) (changed bool, err error) {
@@ -101,9 +223,23 @@ func (v wrapVersionKVValidator) Sync(lr *sladder.KeyValue, rr *sladder.KeyValue)
 		return false, err
 	}
 
+	props := wrapVersionKVSyncProperties{}
+
+	sync := func(local, remote *sladder.KeyValue) (changed bool, err error) {
+		if v.extendedSyncer != nil {
+			return v.extendedSyncer.SyncEx(local, remote, &props)
+		}
+		if remote == nil ||
+			!props.Concurrent() ||
+			remote.Value >= local.Value {
+			return v.ov.Sync(local, remote)
+		}
+		return false, nil
+	}
+
 	// remote
 	if rr == nil { // a deletion
-		return v.ov.Sync(&sladder.KeyValue{
+		return sync(&sladder.KeyValue{
 			Key: lr.Key, Value: or.Value,
 		}, nil)
 	}
@@ -113,9 +249,14 @@ func (v wrapVersionKVValidator) Sync(lr *sladder.KeyValue, rr *sladder.KeyValue)
 		return false, err
 	}
 
+	if cr.Version < or.Version { // reject old version.
+		return false, nil
+	}
+	props.isConcurrent = cr.Version == or.Version
+
 	// normal sync.
 	obuf, cbuf := &sladder.KeyValue{Key: lr.Key, Value: or.Value}, &sladder.KeyValue{Key: rr.Key, Value: cr.Value}
-	if changed, err = v.ov.Sync(obuf, cbuf); err != nil {
+	if changed, err = sync(obuf, cbuf); err != nil {
 		return false, err
 	}
 	if or.Value != obuf.Value {

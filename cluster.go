@@ -51,6 +51,8 @@ type Cluster struct {
 	// Whether node should be preserved when all node names removed.
 	PreserveUnnamed bool
 
+	transactionID uint32
+
 	log Logger
 }
 
@@ -156,6 +158,10 @@ func (c *Cluster) ContainNodes(nodes ...interface{}) bool {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
+	return c.containNodes(nodes...)
+}
+
+func (c *Cluster) containNodes(nodes ...interface{}) bool {
 checkNodes:
 	for _, raw := range nodes {
 		switch n := raw.(type) {
@@ -179,6 +185,7 @@ checkNodes:
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -317,13 +324,7 @@ func (c *Cluster) updateNodeID(ctx *WatchEventContext, meta KeyValueEventMetadat
 	c.updateNodeNameFromKV(meta.Node(), meta.Snapshot())
 }
 
-func (c *Cluster) updateNodeName(n *Node, newNames []string) {
-	if n == nil {
-		return
-	}
-	n.lock.Lock()
-	defer n.lock.Unlock()
-
+func (c *Cluster) _updateNodeName(n *Node, newNames []string) {
 	if len(n.names) < 1 {
 		if len(newNames) < 1 { // no name.
 			c.emptyNodes[n] = struct{}{}
@@ -366,6 +367,15 @@ func (c *Cluster) updateNodeName(n *Node, newNames []string) {
 
 	// save to node.
 	n.assignNames(mergedNames, true)
+}
+
+func (c *Cluster) updateNodeName(n *Node, newNames []string) {
+	if n == nil {
+		return
+	}
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	c._updateNodeName(n, newNames)
 }
 
 // NewNode creates an new empty node in cluster.

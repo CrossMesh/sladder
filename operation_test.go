@@ -13,9 +13,10 @@ type MockKVTransaction struct {
 	old, new string
 }
 
-func (m *MockKVTransaction) Set(key string)        { m.updated, m.new = true, key }
-func (m *MockKVTransaction) After() (bool, string) { return m.updated, m.new }
-func (m *MockKVTransaction) Before() string        { return m.old }
+func (m *MockKVTransaction) Set(key string)             { m.updated, m.new = true, key }
+func (m *MockKVTransaction) After() (bool, string)      { return m.updated, m.new }
+func (m *MockKVTransaction) Before() string             { return m.old }
+func (m *MockKVTransaction) SetRawValue(x string) error { m.updated, m.new = x != m.old, x; return nil }
 
 type MockKVTransactionValidator struct {
 	SyncFailKeyMap map[string]error
@@ -66,7 +67,7 @@ type MockCoordinatingEngine struct {
 	hook struct {
 		start    func(*Transaction) (bool, error)
 		beginkv  func(*Transaction, *Node, string) (*KeyValue, error)
-		commit   func(*Transaction, []*KVTransactionRecord) (bool, error)
+		commit   func(*Transaction, []*TransactionOperation) (bool, error)
 		rollback func(*Transaction) error
 	}
 }
@@ -87,7 +88,7 @@ func (m *MockCoordinatingEngine) TransactionBeginKV(txn *Transaction, node *Node
 	return s(txn, node, key)
 }
 
-func (m *MockCoordinatingEngine) TransactionCommit(txn *Transaction, rs []*KVTransactionRecord) (bool, error) {
+func (m *MockCoordinatingEngine) TransactionCommit(txn *Transaction, rs []*TransactionOperation) (bool, error) {
 	s := m.hook.commit
 	if s == nil {
 		return m.MockTxnCoordinator.TransactionCommit(txn, rs)
@@ -195,7 +196,7 @@ func TestOperation(t *testing.T) {
 			Key:   "key5",
 			Value: "mock1",
 		}, nil)
-		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*KVTransactionRecord) bool {
+		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*TransactionOperation) bool {
 			if len(rs) < 1 {
 				return false
 			}
@@ -283,7 +284,7 @@ func TestOperation(t *testing.T) {
 		assert.Equal(t, "key2", e.Key)
 		assert.Equal(t, "v2", e.Value)
 		// fail commit.
-		failCommit := func(*Transaction, []*KVTransactionRecord) (bool, error) { return false, testError }
+		failCommit := func(*Transaction, []*TransactionOperation) (bool, error) { return false, testError }
 		ei.hook.commit = failCommit
 		assert.Equal(t, testError, c.Txn(func(tx *Transaction) bool {
 			{
@@ -302,7 +303,7 @@ func TestOperation(t *testing.T) {
 		assert.Equal(t, "key2", e.Key)
 		assert.Equal(t, "v2", e.Value)
 		// reject commit
-		rejectCommit := func(*Transaction, []*KVTransactionRecord) (bool, error) { return false, nil }
+		rejectCommit := func(*Transaction, []*TransactionOperation) (bool, error) { return false, nil }
 		ei.hook.commit = rejectCommit
 		assert.Equal(t, ErrRejectedByValidator, c.Txn(func(tx *Transaction) bool {
 			{
@@ -344,7 +345,7 @@ func TestOperation(t *testing.T) {
 
 		m1, m2 := &MockKVTransactionValidator{}, &MockKVTransactionValidator{}
 
-		var lastOrder []*KVTransactionRecord
+		var lastOrder []*TransactionOperation
 
 		assert.NoError(t, c.RegisterKey("key1", m1, false, 0))
 		assert.NoError(t, c.RegisterKey("key2", m2, false, 0))
@@ -352,7 +353,7 @@ func TestOperation(t *testing.T) {
 		assert.NoError(t, c.RegisterKey("key4", m2, false, 0))
 		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
-		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*KVTransactionRecord) bool {
+		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*TransactionOperation) bool {
 			if len(rs) < 1 {
 				return false
 			}

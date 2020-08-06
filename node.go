@@ -39,7 +39,10 @@ func (n *Node) Anonymous() bool { return len(n.names) < 1 }
 func (n *Node) Names() (names []string) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
+	return n.getNames()
+}
 
+func (n *Node) getNames() (names []string) {
 	names = make([]string, len(n.names))
 	copy(names, n.names)
 	return
@@ -161,7 +164,12 @@ func (n *Node) _set(key, value string) error {
 }
 
 func (n *Node) protobufSnapshot(message *proto.Node) {
-	message.Kvs = make([]*proto.Node_KeyValue, 0, len(n.kvs))
+	if message.Kvs != nil {
+		message.Kvs = message.Kvs[:0]
+	} else {
+		message.Kvs = make([]*proto.Node_KeyValue, 0, len(n.kvs))
+	}
+
 	for key, entry := range n.kvs {
 		entry.Key = key
 		if entry.flags&LocalEntry != 0 { // local entry.

@@ -1,7 +1,6 @@
 package gossip
 
 import (
-	"math/rand"
 	"strconv"
 	"testing"
 	"time"
@@ -84,23 +83,111 @@ func TestGossipEngineSync(t *testing.T) {
 		}
 		assert.Less(t, i, maxTimes, "node list cannot be consistency within "+strconv.FormatInt(int64(maxTimes), 10)+" rounds.")
 	})
-
-	t.Run("key_value_sync", func(t *testing.T) {
-		vp := vps[rand.Intn(len(vps))]
-		vp.cv.Txn(func(tx *sladder.Transaction) bool {
-			{
-				rtx, err := tx.KV(vp.cv.Self(), "key1")
-				assert.NoError(t, err)
-				if err != nil {
-					return false
-				}
-				txn := rtx.(*sladder.StringTxn)
-				txn.Set("3")
-			}
-			return true
-		})
-		for _, v := range vp.cv.Self().KeyValueEntries(true) {
-			t.Log(v)
-		}
-	})
+	//
+	//	time.Sleep(time.Second * 2)
+	//	t.Run("key_value_sync", func(t *testing.T) {
+	//		rvps, need := []*testClusterViewPoint{}, 3
+	//		{
+	//			idx := 0
+	//			for _, vp := range vps {
+	//				if len(rvps) < need {
+	//					rvps = append(rvps, vp)
+	//				} else if n := rand.Intn(idx + 1); n < need {
+	//					rvps[n] = vp
+	//				}
+	//				idx++
+	//			}
+	//		}
+	//
+	//		assert.NoError(t, rvps[0].cv.Txn(func(tx *sladder.Transaction) bool {
+	//			{
+	//				rtx, err := tx.KV(rvps[0].cv.Self(), "key1")
+	//				assert.NoError(t, err)
+	//				if err != nil {
+	//					return false
+	//				}
+	//				txn := rtx.(*sladder.StringTxn)
+	//				txn.Set("3")
+	//			}
+	//			return true
+	//		}))
+	//		assert.NoError(t, rvps[1].cv.Txn(func(tx *sladder.Transaction) bool {
+	//			{
+	//				rtx, err := tx.KV(rvps[1].cv.Self(), "key2")
+	//				assert.NoError(t, err)
+	//				if err != nil {
+	//					return false
+	//				}
+	//				txn := rtx.(*sladder.StringTxn)
+	//				txn.Set("444")
+	//			}
+	//			{
+	//				rtx, err := tx.KV(rvps[1].cv.Self(), "key3")
+	//				assert.NoError(t, err)
+	//				if err != nil {
+	//					return false
+	//				}
+	//				txn := rtx.(*sladder.StringTxn)
+	//				txn.Set("1933")
+	//			}
+	//			return true
+	//		}))
+	//		assert.NoError(t, rvps[2].cv.Txn(func(tx *sladder.Transaction) bool {
+	//			{
+	//				rtx, err := tx.KV(rvps[2].cv.Self(), "key1")
+	//				assert.NoError(t, err)
+	//				if err != nil {
+	//					return false
+	//				}
+	//				txn := rtx.(*sladder.StringTxn)
+	//				txn.Set("4")
+	//			}
+	//			return true
+	//		}))
+	//		// Log node states.
+	//		for _, vp := range rvps {
+	//			vp.cv.EventBarrier()
+	//			t.Log("self = ", vp.cv.Self().Names())
+	//
+	//			vp.cv.RangeNodes(func(n *sladder.Node) bool {
+	//				entries := n.KeyValueEntries(true)
+	//				t.Log("    node = ", n.Names(), "entry count = ", len(entries))
+	//				for _, entry := range entries {
+	//					t.Log("      key = ", entry.Key, "  value = ", entry.Value)
+	//				}
+	//				return true
+	//			}, false, false)
+	//		}
+	//		t.FailNow()
+	//		{
+	//			t.Log("starting syncing test...")
+	//			i, maxTimes := 0, 500
+	//			for i < maxTimes {
+	//				for _, vp := range vps {
+	//					vp.engine.ClusterSync()
+	//					vp.cv.EventBarrier()
+	//				}
+	//
+	//				// Log node states.
+	//				for _, vp := range vps {
+	//					t.Log("self = ", vp.cv.Self().Names())
+	//
+	//					vp.cv.RangeNodes(func(n *sladder.Node) bool {
+	//						t.Log("    node = ", n.Names())
+	//						for _, entry := range n.KeyValueEntries(false) {
+	//							t.Log("      key = ", entry.Key, "  value = ", entry.Value)
+	//						}
+	//						return true
+	//					}, false, false)
+	//				}
+	//
+	//				t.Log("sync round", i, "finished")
+	//				if god.AllViewpointConsist(true, false) {
+	//					t.Log("node list consist in sync round", i)
+	//					break
+	//				}
+	//				i++
+	//			}
+	//		}
+	//	})
 }

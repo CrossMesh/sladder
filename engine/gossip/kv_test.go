@@ -104,6 +104,16 @@ func TestKVWrapper(t *testing.T) {
 				assert.Equal(t, "k2", o.Key)
 				assert.Equal(t, "", o.Value)
 			}
+
+			// drop old values.
+			{
+				o, n := &sladder.KeyValue{Key: "k3", Value: "{\"v\": 2, \"o\": \"kb\"}"}, &sladder.KeyValue{Key: "k3", Value: "{\"v\": 1, \"o\": \"bbb\"}"}
+				changed, err := validator.Sync(o, n)
+				assert.NoError(t, err)
+				assert.False(t, changed)
+				assert.Equal(t, "k3", o.Key)
+				assert.Equal(t, "{\"v\": 2, \"o\": \"kb\"}", o.Value)
+			}
 		}
 		// validate
 		{

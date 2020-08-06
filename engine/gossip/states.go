@@ -163,6 +163,17 @@ func (t *SWIMTagTxn) After() (bool, string) { return t.changed, t.tag.Encode() }
 // Before return old value.
 func (t *SWIMTagTxn) Before() string { return t.oldRaw }
 
+// SetRawValue apply raw value to Txn.
+func (t *SWIMTagTxn) SetRawValue(x string) error {
+	newTag := SWIMTag{}
+	if err := newTag.Decode(x); err != nil {
+		return err
+	}
+	t.tag = newTag
+	t.changed = x != t.oldRaw
+	return nil
+}
+
 // Region returns region of tag snapshot
 func (t *SWIMTagTxn) Region() string { return t.tag.Region }
 
@@ -275,17 +286,24 @@ func (t *SWIMTagTxn) SetRegion(region string) string {
 	return old
 }
 
-func (e *EngineInstance) tagTraceTransactionCommit(t *sladder.Transaction, rcs []*sladder.KVTransactionRecord) (accepted bool, err error) {
+func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction, isEngineTxn bool, rcs []*sladder.TransactionOperation) (accepted bool, err error) {
+
 	addList, removeList := []string{}, []string{}
+	nodeOps := []*sladder.TransactionOperation{}
 
 	self := e.cluster.Self()
 	for idx := 0; idx < len(rcs); idx++ {
 		rc := rcs[idx]
-		if self == rc.Node && (rc.Delete || rc.New) && rc.Key != e.swimTagKey {
+		if rc.Txn == nil { // node operation
+			nodeOps = append(nodeOps, rc)
+			continue
+		}
+
+		if self == rc.Node && rc.Key != e.swimTagKey {
 			switch {
-			case rc.New:
+			case !rc.PastExists && rc.Exists:
 				addList = append(addList, rc.Key)
-			case rc.Delete:
+			case rc.PastExists && !rc.Exists:
 				removeList = append(removeList, rc.Key)
 			}
 		}

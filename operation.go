@@ -5,21 +5,36 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/sunmxt/sladder/proto"
 )
 
 var (
 	ErrInvalidTransactionHandler = errors.New("invalid transaction handler")
 	ErrTooManyNodes              = errors.New("too many nodes selected")
 	ErrInvalidNode               = errors.New("invalid node")
+
+	// ErrTransactionCommitViolation raises when any operation breaks commit limitation.
+	ErrTransactionCommitViolation = errors.New("access violation in transaction commit")
+	ErrTransactionStateBroken     = errors.New("a transaction state cannot rollback. cluster states broken")
 )
 
-// KVTransactionRecord contains metadata of a kv txn.
-type KVTransactionRecord struct {
-	LC          uint32 // local logic clock.
-	Node        *Node
-	Key         string
-	Txn         KVTransaction
-	Delete, New bool
+// TransactionOperation contains an operation trace within transaction.
+type TransactionOperation struct {
+	LC uint32
+
+	// Node fields
+	Node                       *Node
+	NodePastExists, NodeExists bool
+
+	// Entry fields
+	Key                         string
+	Txn                         KVTransaction
+	PastExists, Exists, Updated bool
+}
+
+func getExistance(new, txnUpdated, deleted bool) (pastExists, exists, updated bool) {
+	return !new, !(new || deleted) || txnUpdated, txnUpdated
 }
 
 // TxnStartCoordinator traces start of transaction
@@ -34,12 +49,20 @@ type TxnKVCoordinator interface {
 
 // TxnCommitCoordinator traces transaction commit.
 type TxnCommitCoordinator interface {
-	TransactionCommit(*Transaction, []*KVTransactionRecord) (bool, error)
+	TransactionCommit(*Transaction, []*TransactionOperation) (bool, error)
 }
 
 // TxnRollbackCoordinator traces transaction rollback.
 type TxnRollbackCoordinator interface {
 	TransactionRollback(*Transaction) error
+}
+
+// TxnCoordinator traces transaction.
+type TxnCoordinator interface {
+	TxnStartCoordinator
+	TxnRollbackCoordinator
+	TxnCommitCoordinator
+	TxnKVCoordinator
 }
 
 type txnKeyRef struct {
@@ -48,22 +71,36 @@ type txnKeyRef struct {
 }
 
 type txnLog struct {
-	// nil KVTransaction stands for a deletion.
-	txn       KVTransaction
+	deletion bool
+	txn      KVTransaction
+
 	validator KVValidator
 	lc        uint32
 	new       bool
 }
 
+type nodeOpLog struct {
+	deleted bool
+	lc      uint32
+}
+
+const (
+	txnFlagClusterLock = uint8(0x1)
+)
+
 // Transaction contains read-write operation on nodes.
 type Transaction struct {
+	id      uint32
 	lc      uint32
 	Cluster *Cluster
+	flags   uint8
 
-	lock           sync.RWMutex
-	logs           map[txnKeyRef]*txnLog
-	relatedNodes   map[*Node]struct{}
-	nodeSnapshoted bool
+	errs Errors
+
+	lock         sync.RWMutex
+	logs         map[txnKeyRef]*txnLog
+	relatedNodes map[*Node]struct{}
+	nodeOps      map[*Node]*nodeOpLog
 }
 
 func newTransaction(c *Cluster) *Transaction {
@@ -71,15 +108,68 @@ func newTransaction(c *Cluster) *Transaction {
 		Cluster: c,
 		lc:      0,
 		logs:    make(map[txnKeyRef]*txnLog),
+		nodeOps: make(map[*Node]*nodeOpLog),
 	}
 }
 
-// Txn executes new transaction.
-func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
-	t, commit := newTransaction(c), true
+// ID returns transaction ID.
+func (t *Transaction) ID() uint32 { return t.id }
 
-	c.lock.RLock()
-	defer c.lock.RUnlock()
+// Prefail returns unrecoverable errors inside current transaction, mostly indicating a broken transaction.
+func (t *Transaction) Prefail() error { return t.errs.AsError() }
+
+// RangeRelatedNodes iterates nodes related to the transaction.
+func (t *Transaction) RangeRelatedNodes(visit func(*Node) bool) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	for node := range t.relatedNodes {
+		if !visit(node) {
+			return
+		}
+	}
+}
+
+// RelatedNodes return list of nodes related to the transaction.
+func (t *Transaction) RelatedNodes() (nodes []*Node) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	for node := range t.relatedNodes {
+		nodes = append(nodes, node)
+	}
+
+	return
+}
+
+// TxnOption contains extra requirements for a transaction.
+type TxnOption interface{}
+
+type membershipModificationOption struct{}
+
+// MembershipModification creates an option to enable membership changing.
+func MembershipModification() TxnOption { return membershipModificationOption{} }
+
+// Txn executes new transaction.
+func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error) {
+	t, commit := newTransaction(c), true
+	t.id = atomic.AddUint32(&c.transactionID, 1)
+
+	for _, opt := range opts {
+		switch opt.(type) {
+		case membershipModificationOption:
+			t.flags |= txnFlagClusterLock
+		}
+	}
+
+	// TODO(xutao): deadlock detector.
+	if t.flags&txnFlagClusterLock > 0 {
+		c.lock.Lock()
+		defer c.lock.Unlock()
+	} else {
+		c.lock.RLock()
+		defer c.lock.RUnlock()
+	}
 
 	// before transaction.
 	if starter, _ := c.engine.(TxnStartCoordinator); starter != nil {
@@ -90,27 +180,55 @@ func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
 			return ErrRejectedByCoordinator
 		}
 	}
-	// do transaction.
-	if commit = do(t); !commit {
+	rollback := func() error {
 		if rollbacker, _ := c.engine.(TxnRollbackCoordinator); rollbacker != nil {
-			err = rollbacker.TransactionRollback(t)
+			if err := rollbacker.TransactionRollback(t); err != nil {
+				t.errs = append(t.errs, err)
+			}
 		}
 		t.cancel()
-		return
+		return t.errs.AsError()
 	}
+
+	// do transaction.
+	commit = do(t)
+	if t.Prefail() != nil {
+		commit = false
+	}
+	if !commit {
+		return rollback()
+	}
+
+	var finalOps []func()
+
+	finalOps, err = t.generateNameChanges()
+	if err != nil {
+		t.errs = append(t.errs, err)
+		return rollback()
+	}
+
 	// start commit
 	if commiter, _ := c.engine.(TxnCommitCoordinator); commiter != nil {
-		txns := make([]*KVTransactionRecord, 0, len(t.logs))
+		txns := make([]*TransactionOperation, 0, len(t.logs))
 		for ref, log := range t.logs {
-			rc := &KVTransactionRecord{
+			rc := &TransactionOperation{
 				Node: ref.node,
 				Key:  ref.key,
 				Txn:  log.txn,
 				LC:   log.lc,
-				New:  log.new,
 			}
-			if log.txn == nil {
-				rc.Delete = true
+			updated, _ := log.txn.After()
+			nodeOp, _ := t.nodeOps[ref.node]
+			rc.PastExists, rc.Exists, rc.Updated = getExistance(log.new, updated, log.deletion)
+			rc.NodePastExists, rc.NodeExists = nodeOp == nil || nodeOp.deleted, nodeOp == nil || !nodeOp.deleted
+			txns = append(txns, rc)
+		}
+		for node, log := range t.nodeOps {
+			rc := &TransactionOperation{
+				Node:           node,
+				LC:             log.lc,
+				NodeExists:     !log.deleted,
+				NodePastExists: log.deleted,
 			}
 			txns = append(txns, rc)
 		}
@@ -119,39 +237,156 @@ func (c *Cluster) Txn(do func(*Transaction) bool) (err error) {
 			return txns[i].LC < txns[j].LC
 		})
 		if commit, err = commiter.TransactionCommit(t, txns); err != nil {
-			t.cancel()
-			return err
+			t.errs = append(t.errs, err)
+			return rollback()
 		}
 	}
+
 	// save to local.
-	if commit {
-		t.commit()
-	} else {
+	if !commit {
 		t.cancel()
 		return ErrRejectedByValidator
+	}
+
+	finalOps = append(finalOps, t.commit()...)
+	for idx := 0; idx < len(finalOps); idx++ {
+		finalOps[idx]()
 	}
 
 	return nil
 }
 
-// RangeNode iterates over nodes.
-func (t *Transaction) RangeNode(visit func(*Node) bool, excludeSelf, excludeEmpty bool) {
-	for {
-		snapshoted := t.nodeSnapshoted
-		if snapshoted {
-			t.Cluster.rangeNodes(visit, excludeSelf, excludeEmpty)
-			break
-		}
-		t.lock.Lock()
-		if !t.nodeSnapshoted {
-			t.Cluster.lock.RLock()
-			t.nodeSnapshoted = true
-		}
-		t.lock.Unlock()
+// NewNode creates new node.
+func (t *Transaction) NewNode() (*Node, error) {
+	if err := t.Prefail(); err != nil { // reject in case of broken txn
+		return nil, err
 	}
+
+	if t.flags&txnFlagClusterLock == 0 {
+		return nil, ErrTransactionCommitViolation
+	}
+
+	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+
+	node := newNode(t.Cluster)
+	op := &nodeOpLog{deleted: false, lc: lc}
+	t.nodeOps[node] = op
+
+	return node, nil
 }
 
-func (t *Transaction) getCacheKV(ref txnKeyRef, lc uint32) *txnLog {
+// MostPossibleNodeFromProtobuf finds most possible node to which the snapshot belongs.
+func (t *Transaction) MostPossibleNodeFromProtobuf(entries []*proto.Node_KeyValue) (*Node, []string, error) {
+	names, err := t.Cluster.resolveNodeNameFromProtobuf(entries)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(names) < 1 {
+		return nil, nil, nil
+	}
+	return t.Cluster.mostPossibleNode(names), names, nil
+}
+
+// MostPossibleNode return the node whose names cover most of names in given set.
+func (t *Transaction) MostPossibleNode(names []string) *Node {
+	return t.Cluster.mostPossibleNode(names)
+}
+
+// RemoveNode removes node from cluster.
+func (t *Transaction) RemoveNode(node *Node) error {
+	if err := t.Prefail(); err != nil { // reject in case of broken txn
+		return err
+	}
+	if t.flags&txnFlagClusterLock == 0 {
+		return ErrTransactionCommitViolation
+	}
+
+	if node.cluster != t.Cluster {
+		return ErrInvalidNode
+	}
+
+	op, _ := t.nodeOps[node]
+	if node != nil {
+		if op != nil && !op.deleted {
+			delete(t.nodeOps, node)
+		}
+	} else if t.Cluster.containNodes(node) {
+		lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+		op := &nodeOpLog{deleted: true, lc: lc}
+		t.nodeOps[node] = op
+	}
+	return nil
+}
+
+// Names returns names of node.
+func (t *Transaction) Names(node *Node) []string {
+	if node.cluster != t.Cluster {
+		return nil
+	}
+	t.lockRelatedNode(node)
+	return node.getNames()
+}
+
+func (t *Transaction) generateNameChanges() (finals []func(), err error) {
+	nameKeys := t.Cluster.resolver.Keys()
+	if len(nameKeys) < 1 {
+		return nil, nil
+	}
+	sort.Strings(nameKeys)
+
+	updates := make(map[*Node]struct{})
+
+	makeNameUpdateOp := func(node *Node, names []string) func() {
+		return func() { node.cluster._updateNodeName(node, names) }
+	}
+
+	for ref := range t.logs {
+		if sort.SearchStrings(nameKeys, ref.key) >= 0 {
+			updates[ref.node] = struct{}{}
+		}
+	}
+	for node := range updates {
+		kvs := make([]*KeyValue, 0, len(nameKeys))
+		for _, key := range nameKeys {
+			txn, err := t.KV(node, key)
+			if err != nil {
+				return nil, err
+			}
+			_, value := txn.After()
+			kvs = append(kvs, &KeyValue{Key: key, Value: value})
+		}
+		names, err := t.Cluster.resolver.Resolve(kvs...)
+		if err != nil {
+			return nil, err
+		}
+		finals = append(finals, makeNameUpdateOp(node, names))
+	}
+
+	return finals, nil
+}
+
+// RangeNode iterates over nodes.
+func (t *Transaction) RangeNode(visit func(*Node) bool, excludeSelf, excludeEmpty bool) {
+	if !excludeEmpty {
+		for node, log := range t.nodeOps {
+			if log == nil || log.deleted {
+				continue
+			}
+			if !visit(node) {
+				return
+			}
+		}
+	}
+
+	t.Cluster.rangeNodes(func(n *Node) bool {
+		if log, _ := t.nodeOps[n]; log != nil && log.deleted {
+			return true
+		}
+		return visit(n)
+	}, excludeSelf, excludeEmpty)
+}
+
+func (t *Transaction) getCacheLog(ref txnKeyRef, lc uint32) *txnLog {
 	if trace := t.logs[ref]; trace != nil {
 		// update logic clock.
 		for {
@@ -165,54 +400,87 @@ func (t *Transaction) getCacheKV(ref txnKeyRef, lc uint32) *txnLog {
 	return nil
 }
 
+func (t *Transaction) lockRelatedNode(nodes ...*Node) {
+	if t.relatedNodes == nil {
+		t.relatedNodes = make(map[*Node]struct{})
+	}
+
+	for _, n := range nodes {
+		if _, locked := t.relatedNodes[n]; !locked {
+			n.lock.Lock()
+			t.relatedNodes[n] = struct{}{}
+		}
+	}
+}
+
+func (t *Transaction) isRelatedNode(node *Node) bool {
+	_, locked := t.relatedNodes[node]
+	return locked
+}
+
 func (t *Transaction) cleanLocks() {
 	// unlock all related nodes.
 	for node := range t.relatedNodes {
 		node.lock.Unlock()
 	}
-	if t.nodeSnapshoted {
-		// unlock cluster read-lock.
-		t.Cluster.lock.RUnlock()
-	}
 }
 
-func (t *Transaction) commit() {
+func (t *Transaction) commit() (finalOps []func()) {
 	// TODO(xutao): ensure consistency between entries and node names.
 	removedEntries, removedRefs := make([]*KeyValueEntry, 0), make([]*txnKeyRef, 0)
 
-	for ref, trace := range t.logs {
+	for ref, log := range t.logs {
 		entry, exists := ref.node.kvs[ref.key]
-		if trace.txn != nil {
-			updated, newValue := trace.txn.After()
-			if exists && entry != nil { // exists.
-				if updated {
-					// updated
-					origin := entry.Value
-					entry.Value = newValue
-					t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue, ref.node.keyValueEntries(true))
-				}
-				entry.lock.Unlock()
-			} else if updated {
-				// new
-				entry = &KeyValueEntry{
-					KeyValue: KeyValue{
-						Key:   ref.key,
-						Value: newValue,
-					},
-					validator: trace.validator,
-				}
-				ref.node.kvs[ref.key] = entry
-				t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue, ref.node.keyValueEntries(true))
+		if log.txn == nil {
+			continue
+		}
+
+		updated, newValue := log.txn.After()
+		deleted := log.deletion && !updated
+		if exists && entry != nil { // exists.
+			if deleted {
+				delete(ref.node.kvs, ref.key) // remove
+				removedEntries, removedRefs = append(removedEntries, entry), append(removedRefs, &ref)
+			} else if updated { // updated.
+				origin := entry.Value
+				entry.Value = newValue
+				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue, ref.node.keyValueEntries(true))
 			}
-		} else if exists && entry != nil {
-			delete(ref.node.kvs, ref.key) // remove
+			entry.lock.Unlock()
+
+		} else if updated { // new: entry not exists and an update exists.
+			entry = &KeyValueEntry{
+				KeyValue: KeyValue{
+					Key:   ref.key,
+					Value: newValue,
+				},
+				validator: log.validator,
+			}
+			ref.node.kvs[ref.key] = entry
+			t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue, ref.node.keyValueEntries(true))
 		}
 	}
 
 	for idx, entry := range removedEntries { // send delete events.
 		t.Cluster.emitKeyDeletion(removedRefs[idx].node, entry.Key, entry.Value, removedRefs[idx].node.keyValueEntries(true))
 	}
-	t.cleanLocks()
+
+	// node ops.
+	for node, log := range t.nodeOps {
+		if log == nil {
+			continue
+		}
+		if log.deleted {
+			t.Cluster.removeNode(node)
+		} else {
+			t.Cluster.emptyNodes[node] = struct{}{}
+			t.Cluster.emitEvent(EmptyNodeJoined, node)
+		}
+	}
+
+	finalOps = append(finalOps, func() { t.cleanLocks() }) // unlock all.
+
+	return
 }
 
 func (t *Transaction) cancel() {
@@ -227,62 +495,58 @@ func (t *Transaction) cancel() {
 
 // Delete removes KV entry from node.
 func (t *Transaction) Delete(n *Node, key string) (err error) {
-	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
-	ref := txnKeyRef{node: n, key: key}
-
-	t.lock.RLock()
-	trace := t.getCacheKV(ref, lc)
-	t.lock.RUnlock()
-	if trace != nil {
-		trace.lc, trace.txn = lc, nil // mark deleted.
-		return nil
+	if err := t.Prefail(); err != nil { // reject in case of broken txn
+		return err
 	}
 
-	trace = &txnLog{lc: lc}
-	t.logs[ref] = trace
+	var log *txnLog
+
+	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+
+	t.lock.Lock()
+	log, _, err = t.getLatestLog(n, key, true, lc)
+	defer t.lock.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	if err = log.txn.SetRawValue(log.txn.Before()); err != nil {
+		return err
+	}
+	log.deletion = true // mark deleted.
 
 	return nil
 }
 
-// KV start kv transaction on node.
-func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
-	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+func (t *Transaction) getLatestLog(n *Node, key string, create bool, lc uint32) (log *txnLog, created bool, err error) {
 	ref := txnKeyRef{node: n, key: key}
 
-	t.lock.RLock()
-	trace := t.getCacheKV(ref, lc)
-	t.lock.RUnlock()
-	if trace != nil && trace.txn != nil {
-		return trace.txn, nil
-	}
-
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if trace = t.getCacheKV(ref, lc); trace != nil {
-		return trace.txn, nil
+	if log = t.getCacheLog(ref, lc); log != nil {
+		return log, false, nil
 	}
 
 	if n.cluster != t.Cluster {
-		return nil, ErrInvalidNode
+		return nil, false, ErrInvalidNode
 	}
 
-	if t.relatedNodes == nil {
-		t.relatedNodes = make(map[*Node]struct{})
-	}
-	if _, locked := t.relatedNodes[n]; !locked {
-		n.lock.Lock()
-		t.relatedNodes[n] = struct{}{}
+	if !create {
+		return nil, false, nil
 	}
 
-	var existing *KeyValueEntry
-	var snap *KeyValue
+	t.lockRelatedNode(n)
+
+	var (
+		snap *KeyValue
+		txn  KVTransaction
+	)
 
 	validator, _ := t.Cluster.validators[key]
 
 	if kver, _ := t.Cluster.engine.(TxnKVCoordinator); kver != nil {
 		latestSnap, err := kver.TransactionBeginKV(t, n, key)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		// perfer coordinator provided snapshot.
 		if latestSnap != nil {
@@ -290,7 +554,7 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 		}
 	}
 
-	trace = &txnLog{
+	log = &txnLog{
 		lc:        lc,
 		validator: validator,
 		new:       false,
@@ -300,35 +564,168 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 		// try local snapshot
 		if e, exists := n.kvs[key]; !exists || e == nil {
 			// new empty entry if not exist.
-			snap, trace.new = &KeyValue{Key: key}, true
+			snap, log.new = &KeyValue{Key: key}, true
 
 		} else {
 			// lock this entry.
 			e.lock.Lock()
-			validator, existing, snap = e.validator, e, &e.KeyValue
+			validator, snap = e.validator, &e.KeyValue
+
+			defer func() {
+				if err != nil {
+					e.lock.Unlock()
+				}
+			}()
 		}
 	}
 
 	if validator == nil {
-		return nil, ErrValidatorMissing
+		return nil, false, ErrValidatorMissing
 	}
 
 	// create entry transaction
 	if txn, err = validator.Txn(*snap); err != nil {
-		if existing != nil {
-			existing.lock.Unlock()
-		}
 		t.Cluster.log.Fatalf("validator of key \"%v\" failed to create transaction: " + err.Error())
 	}
-	// save
-	trace.txn, t.logs[ref] = txn, trace
 
+	// save
+	t.logs[txnKeyRef{key: key, node: n}], log.txn = log, txn
+
+	return log, true, nil
+}
+
+func (t *Transaction) getKV(n *Node, key string, lc uint32) (KVTransaction, error) {
+	log, _, err := t.getLatestLog(n, key, true, lc)
+	if err != nil {
+		return nil, err
+	}
+	txn := log.txn
+
+	// TODO(xutao): support nested wrapper.
 	// get real txn.
 	if wrapper, wrapped := txn.(KVTransactionWrapper); wrapped {
 		txn = wrapper.KVTransaction()
 	}
 
-	return
+	return txn, nil
+}
+
+// KV start kv transaction on node.
+func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
+	if err := t.Prefail(); err != nil { // reject in case of broken txn
+		return nil, err
+	}
+
+	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+	ref := txnKeyRef{node: n, key: key}
+
+	t.lock.RLock()
+	log := t.getCacheLog(ref, lc)
+	t.lock.RUnlock()
+	if log != nil && log.txn != nil {
+		return log.txn, nil
+	}
+
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	return t.getKV(n, key, lc)
+}
+
+// KeyExists checks whether keys exists in node.
+func (t *Transaction) KeyExists(node *Node, keys ...string) bool {
+	if node == nil || len(keys) < 1 {
+		return true
+	}
+	if node.cluster != t.Cluster {
+		return false
+	}
+
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	t.lockRelatedNode(node)
+
+	for _, key := range keys {
+		log, _ := t.logs[txnKeyRef{key: key, node: node}]
+		if log != nil {
+			if !(log.new || log.deletion) {
+				continue
+			}
+			if updated, _ := log.txn.After(); updated {
+				continue
+			}
+			return false
+		} else if _, exists := node.kvs[key]; !exists {
+			return false
+		}
+	}
+
+	return true
+}
+
+// RangeNodeKeys iterates over keys of node entries.
+func (t *Transaction) RangeNodeKeys(n *Node, visit func(key string, pastExists bool) bool) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	t.rangeNodeKeys(n, visit)
+}
+
+// ReadNodeSnapshot creates node snapshot.
+func (t *Transaction) ReadNodeSnapshot(node *Node, message *proto.Node) {
+	if node == nil || message == nil {
+		return
+	}
+
+	if node.cluster != t.Cluster {
+		return
+	}
+
+	t.lock.RLock()
+	if !t.isRelatedNode(node) {
+		node.lock.RLock()
+		defer node.lock.RUnlock()
+	}
+	t.lock.RUnlock()
+
+	node.protobufSnapshot(message)
+}
+
+func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists bool) bool) {
+	existingKeys := make(map[string]struct{}, len(n.kvs))
+
+	visit := func(key string, pastExists bool) bool {
+		existingKeys[key] = struct{}{}
+		return visitFn(key, pastExists)
+	}
+
+	for _, entry := range n.kvs {
+		log, exists := t.logs[txnKeyRef{key: entry.Key, node: n}]
+		if exists {
+			updated, _ := log.txn.After()
+			if _, exists, _ = getExistance(log.new, updated, log.deletion); !exists {
+				continue
+			}
+		}
+		if !visit(entry.Key, true) {
+			return
+		}
+	}
+
+	for ref, log := range t.logs {
+		if _, visited := existingKeys[ref.key]; visited {
+			continue
+		}
+		updated, _ := log.txn.After()
+		pastExists, exists, _ := getExistance(log.new, updated, log.deletion)
+		if !exists {
+			continue
+		}
+		if !visit(ref.key, pastExists) {
+			return
+		}
+	}
 }
 
 // OperationContext traces operation scope.

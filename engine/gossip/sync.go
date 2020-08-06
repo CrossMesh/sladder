@@ -1,6 +1,8 @@
 package gossip
 
 import (
+	"fmt"
+	"math/rand"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -9,7 +11,6 @@ import (
 	"github.com/sunmxt/sladder"
 	pb "github.com/sunmxt/sladder/engine/gossip/pb"
 	"github.com/sunmxt/sladder/proto"
-	gproto "github.com/sunmxt/sladder/proto"
 )
 
 func (e *EngineInstance) goClusterSync() {
@@ -20,75 +21,87 @@ func (e *EngineInstance) goClusterSync() {
 	}
 }
 
-func (e *EngineInstance) newSyncClusterSnapshot() *proto.Cluster {
-	var snap gproto.Cluster
+func (e *EngineInstance) newSyncClusterSnapshot(t *sladder.Transaction) (snap *proto.Cluster) {
+	snap = &proto.Cluster{}
 
-	leavingNodeUpdated := false
-
-	// TODO: refactor.
-	e.cluster.ProtobufSnapshot(&snap, func(node *sladder.Node) bool {
-		if !leavingNodeUpdated {
-			for leaving := range e.leavingNodes {
-				if poss := e.cluster.MostPossibleNode(leaving.Names()); poss != nil {
-					delete(e.leavingNodes, node)
-				}
-			}
-			leavingNodeUpdated = true
-		}
-		return true
-	})
-
-	for node := range e.leavingNodes {
-		msg := &proto.Node{}
-		node.ProtobufSnapshot(msg)
-		snap.Nodes = append(snap.Nodes, msg)
+	readSnap := func(n *sladder.Node) {
+		nmsg := &proto.Node{}
+		t.ReadNodeSnapshot(n, nmsg)
+		snap.Nodes = append(snap.Nodes, nmsg)
 	}
 
-	return &snap
+	t.RangeNode(func(n *sladder.Node) bool { // prepare snapshot.
+		readSnap(n)
+		return true
+	}, false, true)
+
+	e.lock.Lock()
+	for leaving := range e.leavingNodes {
+		if poss := e.cluster.MostPossibleNode(leaving.Names()); poss != nil {
+			delete(e.leavingNodes, leaving)
+		}
+	}
+	for node := range e.leavingNodes {
+		readSnap(node)
+	}
+	e.lock.Unlock()
+
+	return
 }
 
-// ClusterSync does one cluster sync process.
+// ClusterSync performs one cluster sync process.
 func (e *EngineInstance) ClusterSync() {
-	nodes := e.selectRandomNodes(e.getGossipFanout(), true)
-	if len(nodes) < 1 {
-		return
-	}
+	var (
+		nodes [][]string
+		snap  *proto.Cluster
+	)
+
+	fanout := e.getGossipFanout()
+
+	e.cluster.Txn(func(t *sladder.Transaction) bool {
+		cnt := int32(0)
+
+		// select nodes to gossip.
+		t.RangeNode(func(n *sladder.Node) bool {
+			names := t.Names(n)
+			if len(names) < 1 { // annoymous node.
+				return false
+			}
+			if int32(len(nodes)) < fanout {
+				nodes = append(nodes, names)
+			} else if i := rand.Int31n(cnt + 1); i < fanout {
+				nodes[i] = names
+			}
+			cnt++
+
+			if len(nodes) < 1 {
+				return false
+			}
+
+			snap = e.newSyncClusterSnapshot(t)
+
+			return false
+		}, true, true)
+
+		return false
+	}, sladder.MembershipModification())
 
 	setTimeout := func(id uint64) {
 		time.AfterFunc(e.getGossipPeriod()*10, func() {
-			e.lock.Lock()
-			defer e.lock.Unlock()
-			delete(e.inSync, id)
+			e.inSync.Delete(id)
 			atomic.AddUint64(&e.statistics.TimeoutSyncs, 1)
 		})
 	}
 
-	// prepare snapshot.
-	snap := e.newSyncClusterSnapshot()
-
-	e.lock.Lock()
-	defer e.lock.Unlock()
-
-	// send to peers.
 	for _, node := range nodes {
-		for {
-			id, err := pb.NewMessageID()
-			if err != nil {
-				e.log.Fatal("cannot generate message id, got " + err.Error())
-			}
-			_, used := e.inSync[id]
-			if used {
-				continue
-			}
-			e.inSync[id] = struct{}{}
-			atomic.AddUint64(&e.statistics.InSync, 1)
-			setTimeout(id)
-			e.sendProto(node.Names(), &pb.Sync{
-				Id:      id,
-				Cluster: snap,
-			})
-			break
-		}
+		id := atomic.AddUint64(&e.syncCounter, 1)
+		atomic.AddUint64(&e.statistics.InSync, 1)
+		e.inSync.Store(id, struct{}{})
+		setTimeout(id)
+		e.sendProto(node, &pb.Sync{
+			Id:      id,
+			Cluster: snap,
+		})
 	}
 }
 
@@ -104,10 +117,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		return
 	}
 
-	e.lock.Lock()
-	defer e.lock.Unlock()
-
-	// refine messages.
+	// we first refine messages.
 	eliNodeIdx, nIdx := 0, 0
 	for nIdx < len(sync.Cluster.Nodes) {
 		pn := sync.Cluster.Nodes[nIdx]
@@ -129,28 +139,27 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					} else {
 						tag = t
 					}
+					// reset index then we start to filter entries.
 					Idx, eliIdx = 0, 0
 					continue
 				}
-
 				Idx++
 
 			} else {
 				// filter entries.
 				if eIdx < len(tag.EntryList[eIdx]) {
-					if kv.Key < tag.EntryList[eIdx] {
-						// drop entry as key is not in entry list.
-						Idx++
-
-					} else if kv.Key == tag.EntryList[eIdx] || kv.Key == e.swimTagKey {
+					if kv.Key == e.swimTagKey || kv.Key == tag.EntryList[eIdx] {
 						// accept
 						pn.Kvs[eliIdx] = pn.Kvs[Idx]
 						eliIdx++
 						Idx++
-
+					} else if kv.Key < tag.EntryList[eIdx] {
+						// drop entry as key is not in entry list.
+						Idx++
 					} else {
 						eIdx++
 					}
+
 				} else {
 					break
 				}
@@ -168,34 +177,100 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 	}
 	sync.Cluster.Nodes = sync.Cluster.Nodes[:eliNodeIdx]
 
-	e.cluster.SyncFromProtobufSnapshot(sync.Cluster, true, func(node *sladder.Node, kvs []*proto.Node_KeyValue) bool {
-		for _, kv := range kvs {
-			if kv.Key != e.swimTagKey {
+	var (
+		errs sladder.Errors
+		snap *proto.Cluster
+	)
+	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		// mark txn internal.
+		e.innerTxnIDs.Store(t.ID(), struct{}{})
+
+		snap = e.newSyncClusterSnapshot(t) // read a snapshot first.
+
+		var newNode *sladder.Node
+
+		// start apply snapshot to cluster.
+		for _, mnode := range sync.Cluster.Nodes {
+			node, names, err := t.MostPossibleNodeFromProtobuf(mnode.Kvs) // find related node.
+			if err != nil {
+				errs = append(errs, err, fmt.Errorf("node lookup failure"))
+				return false
+			}
+			if len(names) < 1 { // skip in case of a remote anonymous node.
 				continue
 			}
-			tag := &SWIMTag{}
-			if err := tag.Decode(kv.Value); err != nil {
-				e.log.Warn("drop a node with invalid swim tag in sync message. decode err = \"%v\"." + err.Error())
-				return false
-			}
-			if (tag.State == DEAD || tag.State == LEFT) && node == nil {
-				// this node was removed from cluster. we won't accept the old states.
-				return false
-			}
-			break
-		}
-		return true
-	}, nil)
 
-	if _, inSync := e.inSync[sync.Id]; inSync {
-		delete(e.inSync, sync.Id)
+			tagKeyIndex := -1
+			for idx, kv := range mnode.Kvs {
+				if kv.Key == e.swimTagKey {
+					tagKeyIndex = idx
+					break
+				}
+			}
+
+			if node == nil { // no related node found.
+				// check swim tag.
+				if tagKeyIndex < 0 {
+					e.log.Warn("drop a node without swim tag.")
+					continue
+				}
+
+				tag := &SWIMTag{}
+				if err := tag.Decode(mnode.Kvs[tagKeyIndex].Value); err != nil {
+					e.log.Warnf("drop a node with invalid swim tag in sync message. (decode err = \"%v\").", err.Error())
+					return false
+				}
+
+				if (tag.State == DEAD || tag.State == LEFT) && node == nil {
+					// this node seem to be removed from cluster. we won't accept the old states. skip.
+					continue
+				}
+
+				if newNode == nil { // allocate a new node.
+					if newNode, err = t.NewNode(); err != nil {
+						errs = append(errs, err, fmt.Errorf("cannot create new node"))
+						return false
+					}
+				}
+				node = newNode
+
+			} else if tagKeyIndex < 0 && t.KeyExists(node, e.swimTagKey) {
+				continue
+			}
+
+			// now apply snapshot.
+			if err = t.MergeNodeSnapshot(node, mnode, true, false, false); err != nil {
+				e.log.Warnf("apply node snapshot failure. skip. (err = \"%v\") {node = %v}", err, node.PrintableName())
+				continue
+			} else {
+				newNode = nil
+			}
+		}
+
+		if newNode != nil { // extra unused empty node.
+			if err := t.RemoveNode(newNode); err != nil {
+				errs = append(errs, err)
+				return false
+			}
+		}
+
+		return true
+	}, sladder.MembershipModification()); err != nil { // in order to lock entire cluster, we are required to use MembershipModification().
+		errs = append(errs, err)
+	}
+
+	if err := errs.AsError(); err != nil {
+		e.log.Warnf("a sync failure raised. %v", err.Error())
+	}
+
+	if _, inSync := e.inSync.Load(sync.Id); inSync {
+		e.inSync.Delete(sync.Id)
 		atomic.AddUint64(&e.statistics.InSync, 0xFFFFFFFFFFFFFFFF) // -1
 		atomic.AddUint64(&e.statistics.FinishedSync, 1)
-		return
 	}
 
 	e.sendProto(from, &pb.Sync{
 		Id:      sync.Id,
-		Cluster: e.newSyncClusterSnapshot(),
+		Cluster: snap,
 	})
 }

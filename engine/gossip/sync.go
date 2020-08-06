@@ -78,10 +78,10 @@ func (e *EngineInstance) ClusterSync() {
 				return false
 			}
 
-			snap = e.newSyncClusterSnapshot(t)
-
 			return false
 		}, true, true)
+
+		snap = e.newSyncClusterSnapshot(t)
 
 		return false
 	}, sladder.MembershipModification())
@@ -147,7 +147,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 
 			} else {
 				// filter entries.
-				if eIdx < len(tag.EntryList[eIdx]) {
+				if eIdx < len(tag.EntryList) {
 					if kv.Key == e.swimTagKey || kv.Key == tag.EntryList[eIdx] {
 						// accept
 						pn.Kvs[eliIdx] = pn.Kvs[Idx]
@@ -221,7 +221,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					return false
 				}
 
-				if (tag.State == DEAD || tag.State == LEFT) && node == nil {
+				if tag.State == DEAD || tag.State == LEFT {
 					// this node seem to be removed from cluster. we won't accept the old states. skip.
 					continue
 				}
@@ -239,7 +239,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			}
 
 			// now apply snapshot.
-			if err = t.MergeNodeSnapshot(node, mnode, true, false, false); err != nil {
+			if err = t.MergeNodeSnapshot(node, mnode, false, false, false); err != nil {
 				e.log.Warnf("apply node snapshot failure. skip. (err = \"%v\") {node = %v}", err, node.PrintableName())
 				continue
 			} else {

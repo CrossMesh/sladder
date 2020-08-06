@@ -426,7 +426,6 @@ func (t *Transaction) cleanLocks() {
 }
 
 func (t *Transaction) commit() (finalOps []func()) {
-	// TODO(xutao): ensure consistency between entries and node names.
 	removedEntries, removedRefs := make([]*KeyValueEntry, 0), make([]*txnKeyRef, 0)
 
 	for ref, log := range t.logs {
@@ -601,10 +600,13 @@ func (t *Transaction) getKV(n *Node, key string, lc uint32) (KVTransaction, erro
 	}
 	txn := log.txn
 
-	// TODO(xutao): support nested wrapper.
 	// get real txn.
-	if wrapper, wrapped := txn.(KVTransactionWrapper); wrapped {
-		txn = wrapper.KVTransaction()
+	for {
+		if wrapper, wrapped := txn.(KVTransactionWrapper); wrapped {
+			txn = wrapper.KVTransaction()
+			continue
+		}
+		break
 	}
 
 	return txn, nil
@@ -714,6 +716,9 @@ func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists
 	}
 
 	for ref, log := range t.logs {
+		if ref.node != n {
+			continue
+		}
 		if _, visited := existingKeys[ref.key]; visited {
 			continue
 		}

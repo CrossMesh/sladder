@@ -59,56 +59,61 @@ func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool)
 		return false
 	}
 
-	// node
 	var prevList []string
-	for vp := range g.vps {
-		nameList := []string{}
-		vp.cv.RangeNodes(func(n *sladder.Node) bool {
-			names := n.Names()
-			sort.Strings(names)
-			nameList = append(nameList, "\""+strings.Join(names, "\",\"")+"\"")
-			return true
-		}, false, false)
-		sort.Strings(nameList)
 
-		if prevList != nil {
-			util.RangeOverStringSortedSet(prevList, nameList, stopFn, stopFn, nil)
-		}
-		if !consist {
-			return
-		}
-		prevList = nameList
-	}
+	if nodes {
+		// node
+		for vp := range g.vps {
+			nameList := []string{}
+			vp.cv.RangeNodes(func(n *sladder.Node) bool {
+				names := n.Names()
+				sort.Strings(names)
+				nameList = append(nameList, "\""+strings.Join(names, "\",\"")+"\"")
+				return true
+			}, false, false)
+			sort.Strings(nameList)
 
-	// entries.
-	type kvList struct {
-		Key   string `json:"k"`
-		Value string `json:"v"`
-	}
-
-	prevList = nil
-	for vp := range g.vps {
-		entriesList := []string{}
-
-		vp.cv.RangeNodes(func(n *sladder.Node) bool {
-			for _, kv := range n.KeyValueEntries(true) {
-				b, err := json.Marshal(&kvList{Key: kv.Key, Value: kv.Value})
-				if err != nil {
-					panic(err)
-				}
-				entriesList = append(entriesList, string(b))
+			if prevList != nil {
+				util.RangeOverStringSortedSet(prevList, nameList, stopFn, stopFn, nil)
 			}
-			return true
-		}, false, false)
-		sort.Strings(entriesList)
+			if !consist {
+				return
+			}
+			prevList = nameList
+		}
+	}
 
-		if prevList != nil {
-			util.RangeOverStringSortedSet(prevList, entriesList, stopFn, stopFn, nil)
+	if entries {
+		// entries.
+		type kvList struct {
+			Key   string `json:"k"`
+			Value string `json:"v"`
 		}
-		if !consist {
-			return
+
+		prevList = nil
+		for vp := range g.vps {
+			entriesList := []string{}
+
+			vp.cv.RangeNodes(func(n *sladder.Node) bool {
+				for _, kv := range n.KeyValueEntries(true) {
+					b, err := json.Marshal(&kvList{Key: kv.Key, Value: kv.Value})
+					if err != nil {
+						panic(err)
+					}
+					entriesList = append(entriesList, string(b))
+				}
+				return true
+			}, false, false)
+			sort.Strings(entriesList)
+
+			if prevList != nil {
+				util.RangeOverStringSortedSet(prevList, entriesList, stopFn, stopFn, nil)
+			}
+			if !consist {
+				return
+			}
+			prevList = entriesList
 		}
-		prevList = entriesList
 	}
 
 	return

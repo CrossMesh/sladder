@@ -172,25 +172,35 @@ func (p *wrapVersionKVSyncProperties) Concurrent() bool           { return p.isC
 func (p *wrapVersionKVSyncProperties) Get(key string) interface{} { return nil }
 
 type wrapVersionKVTxn struct {
-	origin wrapVersionKV
-	o      sladder.KVTransaction
+	oldVersion, version uint32
+	o                   sladder.KVTransaction
 }
 
 // After returns new value wrapped with version.
 func (t *wrapVersionKVTxn) After() (changed bool, new string) {
-	if changed, new = t.o.After(); changed {
-		var err error
-
-		if new, err = (&wrapVersionKV{Value: new, Version: t.origin.Version + 1}).Encode(); err != nil {
-			panic(err)
+	changed, new = t.o.After()
+	wrap := &wrapVersionKV{Value: new}
+	if changed {
+		if t.version > t.oldVersion {
+			wrap.Version = t.version
+		} else {
+			wrap.Version = t.oldVersion + 1
 		}
+	} else {
+		wrap.Version = t.oldVersion
 	}
+
+	var err error
+	if new, err = wrap.Encode(); err != nil {
+		panic(err)
+	}
+
 	return
 }
 
 // Before return origin raw value wrapped with version.
 func (t *wrapVersionKVTxn) Before() string {
-	ori, err := t.origin.Encode()
+	ori, err := (&wrapVersionKV{Value: t.o.Before(), Version: t.oldVersion}).Encode()
 	if err != nil {
 		panic(err)
 	}
@@ -205,20 +215,19 @@ func (t *wrapVersionKVTxn) SetRawValue(x string) error {
 	if err := t.o.SetRawValue(tag.Value); err != nil {
 		return err
 	}
-	t.origin = tag
-
+	t.version = tag.Version
 	return nil
 }
 
 func (t *wrapVersionKVTxn) KVTransaction() sladder.KVTransaction { return t.o }
 
-func (v wrapVersionKVValidator) Sync(lr *sladder.KeyValue, rr *sladder.KeyValue) (changed bool, err error) {
+func (v wrapVersionKVValidator) Sync(rlocal *sladder.KeyValue, rremote *sladder.KeyValue) (changed bool, err error) {
 	// local
-	if lr == nil {
+	if rlocal == nil {
 		return false, nil
 	}
-	or := wrapVersionKV{}
-	if err := or.Decode(lr.Value); err != nil {
+	local := wrapVersionKV{}
+	if err := local.Decode(rlocal.Value); err != nil {
 		v.log.Warnf("wrapVersionKV.Sync() got invalid local value. err = \"%v\"", err)
 		return false, err
 	}
@@ -238,38 +247,39 @@ func (v wrapVersionKVValidator) Sync(lr *sladder.KeyValue, rr *sladder.KeyValue)
 	}
 
 	// remote
-	if rr == nil { // a deletion
+	if rremote == nil { // a deletion
 		return sync(&sladder.KeyValue{
-			Key: lr.Key, Value: or.Value,
+			Key: rlocal.Key, Value: local.Value,
 		}, nil)
 	}
-	cr := wrapVersionKV{}
-	if err := cr.Decode(rr.Value); err != nil {
+	remote := wrapVersionKV{}
+	if err := remote.Decode(rremote.Value); err != nil {
 		v.log.Warnf("wrapVersionKV.Sync() got invalid remote value. err = \"%v\"", err)
 		return false, err
 	}
 
-	if cr.Version < or.Version { // reject old version.
+	if remote.Version < local.Version { // reject old version.
 		return false, nil
 	}
-	props.isConcurrent = cr.Version == or.Version
+	props.isConcurrent = remote.Version == local.Version
 
 	// normal sync.
-	obuf, cbuf := &sladder.KeyValue{Key: lr.Key, Value: or.Value}, &sladder.KeyValue{Key: rr.Key, Value: cr.Value}
+	obuf, cbuf := &sladder.KeyValue{Key: rlocal.Key, Value: local.Value}, &sladder.KeyValue{Key: rremote.Key, Value: remote.Value}
 	if changed, err = sync(obuf, cbuf); err != nil {
 		return false, err
 	}
-	if or.Value != obuf.Value {
+	if !changed && local.Value != obuf.Value {
 		changed = true
 	}
 	if changed {
+		//fmt.Printf("wrapper merge: ver = %v, val = %v <-- ver = %v, val = %v \n", local.Version, local.Value, remote.Version, obuf.Value)
 		// save changes.
-		or.Value, or.Version = obuf.Value, cr.Version
-		new, ierr := or.Encode()
+		local.Value, local.Version = obuf.Value, remote.Version
+		new, ierr := local.Encode()
 		if ierr != nil {
 			return false, ierr
 		}
-		lr.Value = new
+		rlocal.Value = new
 	}
 
 	return
@@ -289,7 +299,7 @@ func (v wrapVersionKVValidator) Validate(x sladder.KeyValue) bool {
 func (v wrapVersionKVValidator) Txn(x sladder.KeyValue) (txn sladder.KVTransaction, err error) {
 	wrapTxn := &wrapVersionKVTxn{}
 
-	wrap := &wrapTxn.origin
+	wrap := &wrapVersionKV{}
 	if err := wrap.Decode(x.Value); err != nil {
 		v.log.Warnf("wrapVersionKV.Txn() decoding got invalid value. err = \"%v\"", err)
 		return nil, err
@@ -300,6 +310,8 @@ func (v wrapVersionKVValidator) Txn(x sladder.KeyValue) (txn sladder.KVTransacti
 	}); err != nil {
 		return nil, err
 	}
+	wrapTxn.oldVersion = wrap.Version
+	wrapTxn.version = wrapTxn.oldVersion
 	wrapTxn.o = txn
 
 	return wrapTxn, nil

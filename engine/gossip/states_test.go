@@ -256,7 +256,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		txn := rtx.(*SWIMTagTxn)
 		assert.Equal(t, old, txn.Before())
 		{
-			changed, val := txn.After()
+			changed, val := txn.Updated(), txn.After()
 			assert.False(t, changed)
 			assert.Equal(t, old, val)
 		}
@@ -278,7 +278,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, DEAD, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -294,7 +294,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, DEAD, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -310,7 +310,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, LEFT, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	{
@@ -326,7 +326,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, DEAD, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	// ClaimSuspected
@@ -343,7 +343,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, SUSPECTED, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -359,7 +359,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, SUSPECTED, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	{
@@ -375,7 +375,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, DEAD, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	{
@@ -391,7 +391,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, LEFT, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	// Leave.
@@ -408,7 +408,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, LEFT, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -424,7 +424,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, LEFT, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	// ClaimAlive
@@ -443,7 +443,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(3), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.False(t, changed)
 	}
 	{
@@ -461,7 +461,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(4), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -479,7 +479,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(4), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -497,7 +497,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(4), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region2", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 
@@ -517,7 +517,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Equal(t, uint32(4), txn.Version())
 		assert.Equal(t, ALIVE, txn.State())
 		assert.Equal(t, "region3", txn.Region())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	// Entry List.
@@ -540,7 +540,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Contains(t, txn.EntryList(false), "2")
 		assert.Contains(t, txn.EntryList(false), "3")
 		assert.Equal(t, ALIVE, txn.State())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 	{
@@ -563,7 +563,7 @@ func TestSWIMTagValidator(t *testing.T) {
 		assert.Contains(t, txn.EntryList(false), "2")
 		assert.Contains(t, txn.EntryList(false), "3")
 		assert.Equal(t, ALIVE, txn.State())
-		changed, _ := txn.After()
+		changed := txn.Updated()
 		assert.True(t, changed)
 	}
 

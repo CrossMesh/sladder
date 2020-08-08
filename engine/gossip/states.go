@@ -158,7 +158,10 @@ type SWIMTagTxn struct {
 }
 
 // After returns modified value.
-func (t *SWIMTagTxn) After() (bool, string) { return t.changed, t.tag.Encode() }
+func (t *SWIMTagTxn) After() string { return t.tag.Encode() }
+
+// Updated checks whether tag is updated.
+func (t *SWIMTagTxn) Updated() bool { return t.changed }
 
 // Before return old value.
 func (t *SWIMTagTxn) Before() string { return t.oldRaw }

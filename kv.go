@@ -32,7 +32,8 @@ type KVExtendedSyncer interface {
 // KVTransaction implements atomic operation.
 type KVTransaction interface {
 	// TODO(xutao): seperate 'updated' and 'newValue'
-	After() (bool, string)    // After returns new value.
+	Updated() bool            // Updated return whether value is updated.
+	After() string            // After returns new value.
 	Before() string           // Before return origin raw value.
 	SetRawValue(string) error // SetRawValue set new raw value.
 }
@@ -111,7 +112,10 @@ func (v StringValidator) Txn(x KeyValue) (KVTransaction, error) {
 }
 
 // After returns new string.
-func (t *StringTxn) After() (bool, string) { return t.origin != t.new, t.new }
+func (t *StringTxn) After() string { return t.new }
+
+// Updated checks whether string updated.
+func (t *StringTxn) Updated() bool { return t.origin != t.new }
 
 // Before returns origin string.
 func (t *StringTxn) Before() string { return t.origin }

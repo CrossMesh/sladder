@@ -14,7 +14,8 @@ type MockKVTransaction struct {
 }
 
 func (m *MockKVTransaction) Set(key string)             { m.updated, m.new = true, key }
-func (m *MockKVTransaction) After() (bool, string)      { return m.updated, m.new }
+func (m *MockKVTransaction) After() string              { return m.new }
+func (m *MockKVTransaction) Updated() bool              { return m.updated }
 func (m *MockKVTransaction) Before() string             { return m.old }
 func (m *MockKVTransaction) SetRawValue(x string) error { m.updated, m.new = x != m.old, x; return nil }
 

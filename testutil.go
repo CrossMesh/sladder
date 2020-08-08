@@ -75,16 +75,20 @@ func (t *TestNamesInKeyTxn) RemoveName(names ...string) {
 	t.tag.Names, t.changed, t.tag.Version = util.RemoveStringSortedSet(t.tag.Names, names...), true, t.originVer+1
 }
 
-func (t *TestNamesInKeyTxn) After() (changed bool, new string) {
+func (t *TestNamesInKeyTxn) After() (new string) {
 	if !t.changed {
-		return false, t.origin
+		return t.origin
 	}
 	if nv, err := json.Marshal(t.tag); err != nil {
 		panic(err)
 	} else {
 		new = string(nv)
 	}
-	return true, new
+	return new
+}
+
+func (t *TestNamesInKeyTxn) Updated() bool {
+	return t.changed
 }
 
 func (t *TestNamesInKeyTxn) Before() string { return t.origin }

@@ -11,7 +11,7 @@ import (
 )
 
 func TestGossipEngineSync(t *testing.T) {
-	god, ctl, err := newClusterGod("tst", 2, 8, nil, nil)
+	god, ctl, err := newClusterGod("tst", 2, 10, nil, nil)
 
 	assert.NotNil(t, god)
 	assert.NotNil(t, ctl)
@@ -82,7 +82,7 @@ func TestGossipEngineSync(t *testing.T) {
 			}
 			i++
 		}
-		assert.Less(t, i, maxTimes, "node list cannot be consistency within "+strconv.FormatInt(int64(maxTimes), 10)+" rounds.")
+		assert.Less(t, i, maxTimes, "node list cannot be consist within "+strconv.FormatInt(int64(maxTimes), 10)+" rounds.")
 	})
 
 	time.Sleep(time.Second * 2)
@@ -191,6 +191,7 @@ func TestGossipEngineSync(t *testing.T) {
 				}
 				i++
 			}
+			assert.Less(t, i, maxTimes, "node entry cannot be consist within "+strconv.FormatInt(int64(maxTimes), 10)+" rounds.")
 		}
 	})
 }

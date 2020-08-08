@@ -176,11 +176,13 @@ type wrapVersionKVTxn struct {
 	o                   sladder.KVTransaction
 }
 
+func (t *wrapVersionKVTxn) Updated() bool { return t.o.Updated() }
+
 // After returns new value wrapped with version.
-func (t *wrapVersionKVTxn) After() (changed bool, new string) {
-	changed, new = t.o.After()
+func (t *wrapVersionKVTxn) After() string {
+	updated, new := t.o.Updated(), t.o.After()
 	wrap := &wrapVersionKV{Value: new}
-	if changed {
+	if updated {
 		if t.version > t.oldVersion {
 			wrap.Version = t.version
 		} else {
@@ -195,7 +197,7 @@ func (t *wrapVersionKVTxn) After() (changed bool, new string) {
 		panic(err)
 	}
 
-	return
+	return new
 }
 
 // Before return origin raw value wrapped with version.
@@ -272,7 +274,6 @@ func (v wrapVersionKVValidator) Sync(rlocal *sladder.KeyValue, rremote *sladder.
 		changed = true
 	}
 	if changed {
-		//fmt.Printf("wrapper merge: ver = %v, val = %v <-- ver = %v, val = %v \n", local.Version, local.Value, remote.Version, obuf.Value)
 		// save changes.
 		local.Value, local.Version = obuf.Value, remote.Version
 		new, ierr := local.Encode()

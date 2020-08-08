@@ -217,7 +217,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 				Txn:  log.txn,
 				LC:   log.lc,
 			}
-			updated, _ := log.txn.After()
+			updated := log.txn.Updated()
 			nodeOp, _ := t.nodeOps[ref.node]
 			rc.PastExists, rc.Exists, rc.Updated = getExistance(log.new, updated, log.deletion)
 			rc.NodePastExists, rc.NodeExists = nodeOp == nil || nodeOp.deleted, nodeOp == nil || !nodeOp.deleted
@@ -352,7 +352,7 @@ func (t *Transaction) generateNameChanges() (finals []func(), err error) {
 			if err != nil {
 				return nil, err
 			}
-			_, value := txn.After()
+			value := txn.After()
 			kvs = append(kvs, &KeyValue{Key: key, Value: value})
 		}
 		names, err := t.Cluster.resolver.Resolve(kvs...)
@@ -434,7 +434,7 @@ func (t *Transaction) commit() (finalOps []func()) {
 			continue
 		}
 
-		updated, newValue := log.txn.After()
+		updated, newValue := log.txn.Updated(), log.txn.After()
 		deleted := log.deletion && !updated
 		if exists && entry != nil { // exists.
 			if deleted {
@@ -654,7 +654,7 @@ func (t *Transaction) KeyExists(node *Node, keys ...string) bool {
 			if !(log.new || log.deletion) {
 				continue
 			}
-			if updated, _ := log.txn.After(); updated {
+			if log.txn.Updated() {
 				continue
 			}
 			return false
@@ -705,7 +705,7 @@ func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists
 	for _, entry := range n.kvs {
 		log, exists := t.logs[txnKeyRef{key: entry.Key, node: n}]
 		if exists {
-			updated, _ := log.txn.After()
+			updated := log.txn.Updated()
 			if _, exists, _ = getExistance(log.new, updated, log.deletion); !exists {
 				continue
 			}
@@ -722,7 +722,7 @@ func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists
 		if _, visited := existingKeys[ref.key]; visited {
 			continue
 		}
-		updated, _ := log.txn.After()
+		updated := log.txn.Updated()
 		pastExists, exists, _ := getExistance(log.new, updated, log.deletion)
 		if !exists {
 			continue

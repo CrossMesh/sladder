@@ -113,7 +113,7 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 			continue
 		}
 
-		_, latestValue := log.txn.After()
+		latestValue := log.txn.After()
 
 		buf := KeyValue{Key: key, Value: latestValue}
 		if accepted, err = syncEntry(&buf, log.validator, msg); err != nil {
@@ -150,7 +150,7 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 		var new string
 
 		diff := syncLogs[lastLog]
-		_, old := diff.log.txn.After()
+		old := diff.log.txn.After()
 		if !diff.isDelete {
 			new = diff.value
 		} else {

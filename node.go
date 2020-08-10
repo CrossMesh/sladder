@@ -18,7 +18,7 @@ var (
 
 // Node represents members of cluster.
 type Node struct {
-	names []string
+	names []string // (sorted)
 
 	lock    sync.RWMutex
 	kvs     map[string]*KeyValueEntry
@@ -189,6 +189,7 @@ func (n *Node) PrintableName() string {
 	} else if len(names) == 1 {
 		return names[0]
 	} else {
+		sort.Strings(names)
 		return fmt.Sprintf("%v", names)
 	}
 }

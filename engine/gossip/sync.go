@@ -11,6 +11,7 @@ import (
 	"github.com/sunmxt/sladder"
 	pb "github.com/sunmxt/sladder/engine/gossip/pb"
 	"github.com/sunmxt/sladder/proto"
+	"github.com/sunmxt/sladder/util"
 )
 
 func (e *EngineInstance) goClusterSync() {
@@ -94,9 +95,9 @@ func (e *EngineInstance) ClusterSync() {
 	}
 
 	for _, node := range nodes {
-		id := atomic.AddUint64(&e.syncCounter, 1)
+		id := e.generateMessageID()
 		atomic.AddUint64(&e.statistics.InSync, 1)
-		e.inSync.Store(id, struct{}{})
+		e.inSync.Store(id, node)
 		setTimeout(id)
 		e.sendProto(node, &pb.Sync{
 			Id:      id,
@@ -117,66 +118,6 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		return
 	}
 
-	// we first refine messages.
-	eliNodeIdx, nIdx := 0, 0
-	for nIdx < len(sync.Cluster.Nodes) {
-		pn := sync.Cluster.Nodes[nIdx]
-
-		var tag *SWIMTag = nil
-
-		eliIdx, Idx, eIdx, reject := 0, 0, 0, false
-		sort.Slice(pn.Kvs, func(i, j int) bool { return pn.Kvs[i].Key < pn.Kvs[j].Key })
-
-		for Idx < len(pn.Kvs) {
-			kv := pn.Kvs[Idx]
-			if tag == nil {
-				if kv.Key == e.swimTagKey {
-					// find entry list first.
-					t := &SWIMTag{}
-					if err := t.Decode(pn.Kvs[Idx].Value); err != nil {
-						e.log.Warn("drop a node with invalid swim tag in sync message. decode err = \"%v\"." + err.Error())
-						reject = true
-					} else {
-						tag = t
-					}
-					// reset index then we start to filter entries.
-					Idx, eliIdx = 0, 0
-					continue
-				}
-				Idx++
-
-			} else {
-				// filter entries.
-				if eIdx < len(tag.EntryList) {
-					if kv.Key == e.swimTagKey || kv.Key == tag.EntryList[eIdx] {
-						// accept
-						pn.Kvs[eliIdx] = pn.Kvs[Idx]
-						eliIdx++
-						Idx++
-					} else if kv.Key < tag.EntryList[eIdx] {
-						// drop entry as key is not in entry list.
-						Idx++
-					} else {
-						eIdx++
-					}
-
-				} else {
-					break
-				}
-			}
-		}
-		if tag != nil {
-			pn.Kvs = pn.Kvs[:eliIdx]
-		}
-
-		if !reject {
-			sync.Cluster.Nodes[eliNodeIdx] = sync.Cluster.Nodes[nIdx]
-			eliNodeIdx++
-		}
-		nIdx++
-	}
-	sync.Cluster.Nodes = sync.Cluster.Nodes[:eliNodeIdx]
-
 	var (
 		errs sladder.Errors
 		snap *proto.Cluster
@@ -187,9 +128,8 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 
 		snap = e.newSyncClusterSnapshot(t) // read a snapshot first.
 
-		var newNode *sladder.Node
-
 		// start apply snapshot to cluster.
+		var newNode *sladder.Node
 		for _, mnode := range sync.Cluster.Nodes {
 			node, names, err := t.MostPossibleNodeFromProtobuf(mnode.Kvs) // find related node.
 			if err != nil {
@@ -220,7 +160,6 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					e.log.Warnf("drop a node with invalid swim tag in sync message. (decode err = \"%v\").", err.Error())
 					return false
 				}
-
 				if tag.State == DEAD || tag.State == LEFT {
 					// this node seem to be removed from cluster. we won't accept the old states. skip.
 					continue
@@ -236,6 +175,58 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 
 			} else if tagKeyIndex < 0 && t.KeyExists(node, e.swimTagKey) {
 				continue
+			}
+
+			useNewNode := false
+			if tagKeyIndex > 0 {
+				// apply swim tag first.
+				tempNode := proto.Node{
+					Kvs: []*proto.Node_KeyValue{mnode.Kvs[tagKeyIndex]},
+				}
+				if err = t.MergeNodeSnapshot(node, &tempNode, false, true, true); err != nil {
+					e.log.Warnf("apply node swim tag failure. skip. (err = \"%v\") {node = %v}", err, node.PrintableName())
+					continue
+				} else {
+					newNode, useNewNode = nil, true
+				}
+				mnode.Kvs[tagKeyIndex] = mnode.Kvs[len(mnode.Kvs)-1]
+				mnode.Kvs = mnode.Kvs[:len(mnode.Kvs)-1]
+			}
+
+			if t.KeyExists(node, e.swimTagKey) {
+				rtx, err := t.KV(node, e.swimTagKey)
+				if err != nil {
+					e.log.Warnf("cannot get swim tag. skip. (err = \"%v\") {node = %v}", err, node.PrintableName())
+					if useNewNode { // remove corrupted node.
+						t.RemoveNode(node)
+					}
+					continue
+				}
+				tag := rtx.(*SWIMTagTxn)
+
+				// refine message.
+				entryList := tag.EntryList(false)
+				sort.Slice(mnode.Kvs, func(i, j int) bool { return mnode.Kvs[i].Key < mnode.Kvs[j].Key })
+				eliIdx, idx, eIdx := 0, 0, 0
+				for idx < len(mnode.Kvs) {
+					kv := mnode.Kvs[idx]
+					if eIdx < len(entryList) {
+						if kv.Key == e.swimTagKey || kv.Key == entryList[eIdx] {
+							// accept
+							mnode.Kvs[eliIdx] = mnode.Kvs[idx]
+							eliIdx++
+							idx++
+						} else if kv.Key < entryList[eIdx] {
+							// drop entry as key is not in entry list.
+							idx++
+						} else {
+							eIdx++
+						}
+					} else {
+						break
+					}
+				}
+				mnode.Kvs = mnode.Kvs[:eliIdx]
 			}
 
 			// now apply snapshot.
@@ -263,14 +254,25 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		e.log.Warnf("a sync failure raised. %v", err.Error())
 	}
 
-	if _, inSync := e.inSync.Load(sync.Id); inSync {
-		e.inSync.Delete(sync.Id)
+	isResponse := false
+	if r, inSync := e.inSync.Load(sync.Id); inSync {
+		to := r.([]string)
+		sort.Strings(from)
+		util.RangeOverStringSortedSet(from, to, nil, nil, func(s *string) bool {
+			isResponse = true
+			return false
+		})
 		atomic.AddUint64(&e.statistics.InSync, 0xFFFFFFFFFFFFFFFF) // -1
 		atomic.AddUint64(&e.statistics.FinishedSync, 1)
 	}
 
-	e.sendProto(from, &pb.Sync{
-		Id:      sync.Id,
-		Cluster: snap,
-	})
+	if isResponse {
+		e.inSync.Delete(sync.Id)
+	} else {
+		e.sendProto(from, &pb.Sync{
+			Id:      sync.Id,
+			Cluster: snap,
+		})
+	}
+
 }

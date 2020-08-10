@@ -2,9 +2,12 @@ package gossip
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"math/rand"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/ptypes"
@@ -160,9 +163,10 @@ type EngineInstance struct {
 	innerTxnIDs sync.Map // map[uint32]struct{}
 
 	// sync fields.
-	syncCounter  uint64
-	inSync       sync.Map                   // map[uint64]struct{}
-	leavingNodes map[*sladder.Node]struct{} // leaving nodes.
+	messageCounter uint64
+	counterSeed    uint64
+	inSync         sync.Map                   // map[uint64]struct{}
+	leavingNodes   map[*sladder.Node]struct{} // leaving nodes.
 
 	// failure detector fields
 	inPing              map[*sladder.Node]*pingContext  // nodes in ping progress
@@ -195,6 +199,10 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 
 // SWIMTagKey returns current SWIM Tag key name.
 func (e *EngineInstance) SWIMTagKey() string { return e.swimTagKey }
+
+func (e *EngineInstance) generateMessageID() uint64 {
+	return atomic.AddUint64(&e.messageCounter, 1) + e.counterSeed
+}
 
 func (e *EngineInstance) getGossipFanout() int32 {
 	fanout := e.Fanout
@@ -314,16 +322,17 @@ func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event 
 }
 
 func (e *EngineInstance) onNodeRemoved(node *sladder.Node) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-
 	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 		r, err := t.KV(node, e.swimTagKey)
 		if err != nil {
 			e.log.Fatal("cannot access switm tag key in node removal txn from region map, got " + err.Error())
 			return false
 		}
+
+		e.lock.Lock()
+		defer e.lock.Unlock()
 		e.removeFromRegion(r.(*SWIMTagTxn).Region(), node, -1)
+
 		return false
 	}); err != nil {
 		e.log.Warn("failed txn when remove node from region map, got " + err.Error())
@@ -439,6 +448,14 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 	if e.arbiter != nil {
 		return nil
 	}
+
+	var seedBuf [8]byte
+	if _, err = crand.Read(seedBuf[:]); err != nil {
+		return err
+	}
+	e.counterSeed = binary.LittleEndian.Uint64(seedBuf[:])
+
+	e.cluster = c
 
 	// register SWIM tag.
 	if err = c.RegisterKey(e.swimTagKey, &SWIMTagValidator{}, true, 0); err != nil {

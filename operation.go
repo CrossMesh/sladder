@@ -287,6 +287,11 @@ func (t *Transaction) MostPossibleNodeFromProtobuf(entries []*proto.Node_KeyValu
 	return t.Cluster.mostPossibleNode(names), names, nil
 }
 
+// ResolveNodeNameFromProtobuf resolves node names from protobuf snapshot
+func (t *Transaction) ResolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) ([]string, error) {
+	return t.Cluster.resolveNodeNameFromProtobuf(entries)
+}
+
 // MostPossibleNode return the node whose names cover most of names in given set.
 func (t *Transaction) MostPossibleNode(names []string) *Node {
 	return t.Cluster.mostPossibleNode(names)

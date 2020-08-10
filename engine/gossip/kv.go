@@ -33,6 +33,7 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 			meta = &nodeOpMeta{}
 			metas[op.Node] = meta
 		}
+
 		if op.Key == e.swimTagKey {
 			rtx, err := t.KV(op.Node, e.swimTagKey)
 			if err != nil {
@@ -71,8 +72,12 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 
 	// enforce entry rules.
 	for node, meta := range metas {
-		if node == self || // exclude self.
-			!node.Anonymous() { // no rule for anonymous node
+		if node.Anonymous() || // no rule for anonymous node
+			self == node { // no rule for self.
+			continue
+		}
+
+		if !t.KeyExists(node, e.swimTagKey) { // no rule for node without SWIM tag node.
 			continue
 		}
 
@@ -97,17 +102,17 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 			if key == e.swimTagKey {
 				return true
 			}
-			if sort.SearchStrings(allowedKeys, key) < 0 { // forbidden key.
+			if idx := sort.SearchStrings(allowedKeys, key); idx >= len(allowedKeys) || allowedKeys[idx] != key { // forbidden key.
 				if pastExists { // passive deletion.
 					passiveDeletedKeys = append(passiveDeletedKeys, key)
-				} else { // user deletion. reject it.
+				} else { // insertion invoked by user. reject it.
 					rejectKey = key
 					return false
 				}
 			}
 			return true
 		})
-		if rejectKey != "" { // user add invalid key.
+		if rejectKey != "" { // user insert invalid key.
 			return false, fmt.Errorf("%v. {key = \"%v\", node = \"%v\"}", sladder.ErrTransactionCommitViolation, rejectKey, node.PrintableName())
 		}
 

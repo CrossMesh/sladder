@@ -245,11 +245,7 @@ func (e *EngineInstance) ping(node *sladder.Node, pingReq *pb.PingReq) {
 			})
 		}
 
-		id, err := pb.NewMessageID()
-		if err != nil {
-			e.log.Fatal("cannot generate message id, got " + err.Error())
-			return
-		}
+		id := e.generateMessageID()
 		e.sendProto(node.Names(), &pb.Ping{
 			Id: id,
 		})

@@ -149,7 +149,9 @@ func TestOperation(t *testing.T) {
 		assert.Equal(t, 1, len(o.nodeNames))
 		assert.Equal(t, "ccc", o.nodeNames[0])
 
-		assert.True(t, c.RemoveNode(n1))
+		removed, err := c.RemoveNode(n1)
+		assert.NoError(t, err)
+		assert.True(t, removed)
 	})
 
 }

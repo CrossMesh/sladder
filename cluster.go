@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	arbit "github.com/sunmxt/arbiter"
 	"github.com/sunmxt/sladder/proto"
@@ -42,9 +43,11 @@ type Cluster struct {
 
 	*eventRegistry
 
-	nodes      map[string]*Node
-	emptyNodes map[*Node]struct{}
-	self       *Node
+	nodeIndexLock sync.RWMutex
+	nodes         map[string]*Node
+	emptyNodes    map[*Node]struct{}
+
+	self *Node
 
 	arbiter *arbit.Arbiter
 
@@ -115,22 +118,24 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 		}
 	}()
 
-	// watch key for resolver.
-	idKeys := resolver.Keys()
-	if len(idKeys) > 0 {
-		ctx := nc.Keys(idKeys...).Watch(nc.updateNodeID)
-		if ctx == nil {
-			msg := "got nil watch context when register watcher for resolver."
-			nc.log.Fatal(msg)
-			return nil, nil, errors.New(msg)
+	var errs Errors
+
+	// add initial self node.
+	if err = nc.Txn(func(t *Transaction) bool {
+		if ierr := t._joinNode(nc.self); ierr != nil {
+			errs = append(errs, ierr)
+			return false
 		}
+		return true
+	}, MembershipModification()); err != nil {
+		errs = append(errs, err)
 	}
 
-	if err = nc.joinNode(nc.self); err != nil {
+	if errs.AsError() != nil {
 		if ierr := engine.Close(); ierr != nil {
-			panic(err)
+			panic(ierr)
 		}
-		return nil, nil, err
+		return nil, nil, errs.AsError()
 	}
 
 	return nc, nc.self, nil
@@ -150,6 +155,10 @@ func (c *Cluster) getNode(name string) *Node {
 func (c *Cluster) GetNode(name string) *Node {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+
+	c.nodeIndexLock.RLock()
+	defer c.nodeIndexLock.RUnlock()
+
 	return c.getNode(name)
 }
 
@@ -157,6 +166,9 @@ func (c *Cluster) GetNode(name string) *Node {
 func (c *Cluster) ContainNodes(nodes ...interface{}) bool {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+
+	c.nodeIndexLock.RLock()
+	defer c.nodeIndexLock.RUnlock()
 
 	return c.containNodes(nodes...)
 }
@@ -197,14 +209,15 @@ func (c *Cluster) MostPossibleNode(names []string) *Node {
 	return c.mostPossibleNode(names)
 }
 
-func (c *Cluster) mostPossibleNode(names []string) (most *Node) {
+// MostPossibleNode return the node whose names cover most of names in given set.
+func MostPossibleNode(names []string, getNode func(name string) *Node) (possible *Node) {
 	if len(names) < 1 {
 		return nil
 	}
 
 	hits, max := make(map[*Node]uint), uint(0)
 	for _, name := range names {
-		node := c.getNode(name)
+		node := getNode(name)
 		hit, exist := hits[node]
 		if !exist {
 			hit = 0
@@ -212,142 +225,128 @@ func (c *Cluster) mostPossibleNode(names []string) (most *Node) {
 		hit++
 		hits[node] = hit
 		if hit > max {
-			most, max = node, hit
+			possible, max = node, hit
 		}
 	}
+
 	return
 }
 
-func (c *Cluster) clearKey(key string) {
-	nodeSet := make(map[*Node]struct{})
-
-	for _, node := range c.nodes {
-		if _, exists := nodeSet[node]; exists {
-			continue
-		}
-		nodeSet[node] = struct{}{}
-
-		node.lock.Lock()
-		entry, exist := node.kvs[key]
-		if exist {
-			delete(node.kvs, key)
-			c.emitKeyDeletion(node, entry.Key, entry.Value, node.keyValueEntries(true))
-		}
-		node.lock.Unlock()
-	}
-}
-
-func (c *Cluster) replaceValidatorForce(key string, validator KVValidator) error {
-	// safety: we hold exclusive lock of cluster scope here. node cannot create new entry now.
-	// this keep validator of entry consistent.
-
-	nodeSet := make(map[*Node]struct{})
-	for _, node := range c.nodes {
-		if _, exists := nodeSet[node]; exists {
-			continue
-		}
-		nodeSet[node] = struct{}{}
-		node.replaceValidatorForce(key, validator)
-	}
-
-	return nil
-}
-
-func (c *Cluster) replaceValidator(key string, validator KVValidator, forceReplace bool) error {
-	if forceReplace {
-		return c.replaceValidatorForce(key, validator)
-	}
-
-	nodeSet := make(map[*Node]struct{})
-	c.rangeNodes(func(node *Node) bool {
-		nodeSet[node] = struct{}{}
-		return true
-	}, false, false)
-
-	for node := range nodeSet {
-		// all nodes should be locked to prevent from entry changing.
-		node.lock.Lock()
-		defer node.lock.Unlock()
-
-		entry := node.getEntry(key)
-		if entry == nil {
-			continue
-		}
-		// ensure that existing value is valid for new validator.
-		if !validator.Validate(entry.KeyValue) {
-			return ErrIncompatibleValidator
-		}
-	}
-
-	// replace for all entry.
-	for node := range nodeSet {
-		entry := node.getEntry(key)
-		if entry == nil {
-			continue
-		}
-		entry.validator = validator
-	}
-
-	return nil
+func (c *Cluster) mostPossibleNode(names []string) *Node {
+	return MostPossibleNode(names, c.getNode)
 }
 
 // RegisterKey registers key-value validator with specific key.
 func (c *Cluster) RegisterKey(key string, validator KVValidator, forceReplace bool, flags uint32) error {
-	// lock entire cluster.
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	var errs Errors
 
-	_, exists := c.validators[key]
-	if validator == nil {
-		if !exists {
-			return nil
+	if err := c.Txn(func(t *Transaction) bool {
+		_, exists := c.validators[key]
+		if validator == nil {
+			if !exists {
+				return false
+			}
 		}
-		// unregister. we need to drop existing key-values in nodes.
-		c.clearKey(key)
-		return nil
+
+		nodes := make([]*Node, 0)
+		t.RangeNode(func(node *Node) bool {
+			nodes = append(nodes, node)
+			return true
+		}, false, false)
+
+		for _, node := range nodes {
+			// replace validator.
+			if err := node.replaceValidator(t, key, validator, forceReplace); err != nil {
+				errs = append(errs, err)
+				return false
+			}
+		}
+
+		// assign the new
+		t.DeferOnCommit(func() {
+			c.validators[key] = validator
+		})
+
+		return true
+	}, MembershipModification()); err != nil {
+		errs = append(errs, err)
 	}
 
-	if exists {
-		// replace validator.
-		if err := c.replaceValidator(key, validator, forceReplace); err != nil {
-			return err
+	return errs.AsError()
+}
+
+func (c *Cluster) delayRemoveNode(n *Node) {
+	c.eventRegistry.enqueueWork(func() {
+		var errs Errors
+
+		if err := c.Txn(func(t *Transaction) bool {
+			if _, err := t.RemoveNode(n); err != nil {
+				errs = append(errs, err)
+				return false
+			}
+			return true
+		}, MembershipModification()); err != nil {
+			errs = append(errs, err)
 		}
-	}
-	// assign the new
-	c.validators[key] = validator
 
-	return nil
+		if err := errs.AsError(); err != nil {
+			// should not happen but just in case.
+			c.arbiter.Go(func() {
+				c.log.Fatalf("transaction fails when removing a empty node. retry in 5 seconds. (err = \"%v\")", errs.AsError())
+				errs = nil
+				select {
+				case <-time.After(time.Second):
+					c.delayRemoveNode(n)
+				case <-c.arbiter.Exit():
+				}
+			})
+		}
+	})
 }
 
-func (c *Cluster) updateNodeID(ctx *WatchEventContext, meta KeyValueEventMetadata) {
-	// TODO: deduplicate snapshots.
-	c.updateNodeNameFromKV(meta.Node(), meta.Snapshot())
-}
-
-func (c *Cluster) _updateNodeName(n *Node, newNames []string) {
+func (c *Cluster) updateNodeName(t *Transaction, n *Node, newNames []string) error {
 	if len(n.names) < 1 {
 		if len(newNames) < 1 { // no name.
-			c.emptyNodes[n] = struct{}{}
+			t.DeferOnCommit(func() {
+				c.emptyNodes[n] = struct{}{}
+			})
 		} else { // has names.
-			delete(c.emptyNodes, n)
-			c.emitEvent(NodeJoined, n)
+			t.DeferOnCommit(func() {
+				delete(c.emptyNodes, n)
+				c.emitEvent(NodeJoined, n)
+			})
 		}
 	} else if len(newNames) < 1 { // all names removed.
 		if !c.PreserveUnnamed && c.self != n {
-			c.removeNode(n)
+			// this transaction has no permission to remove node. delay it.
+			if !t.MembershipModification() {
+				c.delayRemoveNode(n)
+			} else if _, err := t.RemoveNode(n); err != nil {
+				return err
+			}
 		} else {
-			// move to empty node set.
-			c.emptyNodes[n] = struct{}{}
+			t.DeferOnCommit(func() {
+				// move to empty node set.
+				c.emptyNodes[n] = struct{}{}
+			})
 		}
 	}
 
 	sort.Strings(newNames)
 	var mergedNames []string
 
+	deferIndexName := func(name string, node *Node) {
+		t.DeferOnCommit(func() {
+			c.nodes[name] = node
+		})
+	}
+
 	// update name index.
 	util.RangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
 		if s != nil { // remove old name index.
-			delete(c.nodes, *s)
+			t.DeferOnCommit(func() {
+				delete(c.nodes, *s)
+			})
 		}
 		return true
 	}, func(s *string) bool {
@@ -357,7 +356,7 @@ func (c *Cluster) _updateNodeName(n *Node, newNames []string) {
 			c.log.Warnf("drop ununique name %v of node with new names %v", *s, newNames)
 			return true
 		}
-		c.nodes[*s] = n
+		deferIndexName(*s, n)
 		mergedNames = append(mergedNames, *s)
 		return true
 	}, func(s *string) bool {
@@ -366,57 +365,32 @@ func (c *Cluster) _updateNodeName(n *Node, newNames []string) {
 	})
 
 	// save to node.
-	n.assignNames(mergedNames, true)
-}
-
-func (c *Cluster) updateNodeName(n *Node, newNames []string) {
-	if n == nil {
-		return
-	}
-	n.lock.Lock()
-	defer n.lock.Unlock()
-	c._updateNodeName(n, newNames)
-}
-
-// NewNode creates an new empty node in cluster.
-// The new will not be append to cluster until name resolved.
-func (c *Cluster) NewNode() (*Node, error) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	return c.newNode()
-}
-
-func (c *Cluster) joinNode(n *Node) error {
-	c.emitEvent(EmptyNodeJoined, n)
-
-	names, err := c.resolver.Resolve(n.KeyValueEntries(false)...)
-	if err != nil {
-		return err
-	}
-	c.updateNodeName(n, names)
+	t.DeferOnCommit(func() {
+		n.assignNames(mergedNames, true)
+	})
 
 	return nil
 }
 
-func (c *Cluster) updateNodeNameFromKV(n *Node, snap []*KeyValue) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
+// NewNode creates an new empty node in cluster.
+func (c *Cluster) NewNode() (node *Node, err error) {
+	var errs Errors
 
-	newNames, err := c.resolver.Resolve(snap...)
-	if err != nil {
-		c.log.Fatal("resolver failure when node names update, got " + err.Error())
-		return
+	if err = c.Txn(func(t *Transaction) bool {
+		node, err = t.NewNode()
+		if err != nil {
+			errs = append(errs, err)
+			return false
+		}
+		return true
+	}, MembershipModification()); err != nil {
+		errs = append(errs, err)
 	}
-	c.updateNodeName(n, newNames)
-}
 
-func (c *Cluster) newNode() (n *Node, err error) {
-	n = newNode(c)
-	if err = c.joinNode(n); err != nil {
+	if err = errs.AsError(); err != nil {
 		return nil, err
 	}
-	return n, nil
+	return node, nil
 }
 
 // Keys creates operation context
@@ -436,6 +410,10 @@ func (c *Cluster) RangeNodes(visit func(*Node) bool, excludeSelf, excludeEmpty b
 	}
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+
+	c.nodeIndexLock.RLock()
+	defer c.nodeIndexLock.RUnlock()
+
 	c.rangeNodes(visit, excludeSelf, excludeEmpty)
 }
 
@@ -490,7 +468,7 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster, validate func(*Node) bool) 
 	}, false, true)
 }
 
-func (c *Cluster) removeNode(node *Node) (removed bool) {
+func (c *Cluster) _removeNode(node *Node) (removed bool) {
 	// remove from empty node set.
 	if _, exists := c.emptyNodes[node]; exists {
 		delete(c.emptyNodes, node)
@@ -524,17 +502,25 @@ func (c *Cluster) removeNode(node *Node) (removed bool) {
 }
 
 // RemoveNode removes node from cluster.
-func (c *Cluster) RemoveNode(node *Node) (removed bool) {
+func (c *Cluster) RemoveNode(node *Node) (removed bool, err error) {
 	if node == nil {
-		return false
+		return false, nil
 	}
-	c.lock.Lock()
-	defer c.lock.Unlock()
 
-	node.lock.Lock()
-	defer node.lock.Unlock()
+	var errs Errors
 
-	return c.removeNode(node)
+	if err = c.Txn(func(t *Transaction) bool {
+		if removed, err = t.RemoveNode(node); err != nil {
+			errs = append(errs, err)
+			return false
+		}
+		return true
+	}, MembershipModification()); err != nil {
+		errs = append(errs, err)
+	}
+
+	err = errs.AsError()
+	return removed && err == nil, err
 }
 
 // Quit sends "leave" message to cluster and shops member sync.

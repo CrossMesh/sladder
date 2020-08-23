@@ -348,7 +348,7 @@ func (r *eventRegistry) hitWatchContext(node *Node, targetKey string) map[*Watch
 		emitCtxSet[ctx] = struct{}{}
 	}
 	// pick by node name
-	nodeNames := node.names
+	nodeNames := node.Names()
 	for _, name := range nodeNames {
 		ctxSet, _ = r.nodeNameEventWatcherIndex[name]
 		for ctx := range ctxSet {

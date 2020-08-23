@@ -114,10 +114,10 @@ func (v StringValidator) Txn(x KeyValue) (KVTransaction, error) {
 // After returns new string.
 func (t *StringTxn) After() string { return t.new }
 
-// Updated checks whether string updated.
+// Updated checks whether string is updated.
 func (t *StringTxn) Updated() bool { return t.origin != t.new }
 
-// Before returns origin string.
+// Before returns original string.
 func (t *StringTxn) Before() string { return t.origin }
 
 // Get returns current string.

@@ -330,6 +330,8 @@ func TestEvent(t *testing.T) {
 		ctx4.Unregister()
 		ctx5.Unregister()
 
-		assert.True(t, c.RemoveNode(n1))
+		removed, err := c.RemoveNode(n1)
+		assert.NoError(t, err)
+		assert.True(t, removed)
 	})
 }

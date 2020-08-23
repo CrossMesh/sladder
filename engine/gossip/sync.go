@@ -239,7 +239,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		}
 
 		if newNode != nil { // extra unused empty node.
-			if err := t.RemoveNode(newNode); err != nil {
+			if _, err := t.RemoveNode(newNode); err != nil {
 				errs = append(errs, err)
 				return false
 			}

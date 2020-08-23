@@ -44,50 +44,6 @@ func TestNode(t *testing.T) {
 		}
 	})
 
-	t.Run("test_entry_get_set", func(t *testing.T) {
-		assert.NoError(t, c.RegisterKey("key1", model1, true, 0))
-		assert.Equal(t, ErrValidatorMissing, self._set("key2", "v1"))
-
-		assert.Nil(t, self._set("key1", "v1"))
-		entry := self.getEntry("key1")
-		assert.NotNil(t, entry)
-		assert.Equal(t, model1, entry.validator)
-		assert.Equal(t, "key1", entry.Key)
-		assert.Equal(t, "v1", entry.Value)
-		assert.Nil(t, self._set("key1", "v1"))
-
-		assert.Nil(t, self._set("key1", "v2"))
-		assert.NotNil(t, entry)
-		assert.Equal(t, model1, entry.validator)
-		assert.Equal(t, "key1", entry.Key)
-		assert.Equal(t, "v2", entry.Value)
-
-		self.delete("key1")
-	})
-
-	t.Run("test_validator_replace_force", func(t *testing.T) {
-		assert.NoError(t, c.RegisterKey("vrk1", model1, true, 0))
-		assert.Nil(t, self._set("vrk1", "v1"))
-
-		entry := self.getEntry("vrk1")
-		assert.NotNil(t, entry)
-		assert.Equal(t, model1, entry.validator)
-		assert.Equal(t, "vrk1", entry.Key)
-		assert.Equal(t, "v1", entry.Value)
-		assert.Nil(t, self._set("vrk1", "v1"))
-
-		self.replaceValidatorForce("vrk1", model3)
-		entry = self.getEntry("vrk1")
-		assert.NotNil(t, entry)
-		assert.Equal(t, model3, entry.validator)
-
-		self.replaceValidatorForce("vrk1", model2)
-		entry = self.getEntry("vrk1")
-		assert.Nil(t, entry)
-
-		self.delete("vrk1")
-	})
-
 	t.Run("test_snapshot", func(t *testing.T) {
 		kvs := map[string]string{
 			"snk1": "v1",

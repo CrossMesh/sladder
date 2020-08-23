@@ -88,7 +88,12 @@ const (
 	txnFlagClusterLock = uint8(0x1)
 )
 
-// Transaction contains read-write operation on nodes.
+type transactionFinalOp struct {
+	lc uint32
+	op func()
+}
+
+// Transaction contains read/write operations on cluster.
 type Transaction struct {
 	id      uint32
 	lc      uint32
@@ -103,9 +108,9 @@ type Transaction struct {
 	nodeOps      map[*Node]*nodeOpLog
 
 	deferOps struct {
-		normal     []func()
-		onCommit   []func()
-		onRollback []func()
+		normal     []*transactionFinalOp
+		onCommit   []*transactionFinalOp
+		onRollback []*transactionFinalOp
 	}
 }
 
@@ -177,11 +182,10 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 		defer c.lock.RUnlock()
 	}
 
-	var finalOps []func()
-
-	doFinalOps := func() {
+	doFinalOps := func(finalOps []*transactionFinalOp) {
+		sort.Slice(finalOps, func(i, j int) bool { return finalOps[i].lc <= finalOps[j].lc })
 		for idx := 0; idx < len(finalOps); idx++ {
-			finalOps[idx]()
+			finalOps[idx].op()
 		}
 	}
 
@@ -200,8 +204,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 				t.errs = append(t.errs, err)
 			}
 		}
-		finalOps = append(finalOps, t.cancel()...)
-		doFinalOps()
+		doFinalOps(t.cancel())
 		return t.errs.AsError()
 	}
 
@@ -214,7 +217,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 		return rollback()
 	}
 
-	finalOps, err = t.generateNameChanges()
+	err = t.deferNameChanges()
 	if err != nil {
 		t.errs = append(t.errs, err)
 		return rollback()
@@ -261,30 +264,34 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 		return rollback()
 	}
 
-	finalOps = append(finalOps, t.commit()...)
+	doFinalOps(t.commit())
 
-	doFinalOps()
+	return nil
+}
+
+// DO NOT USE THIS DIRECTLY. Use NewNode() instead.
+// This is only used for cluster initialization.
+func (t *Transaction) _joinNode(node *Node) error {
+	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+
+	op := &nodeOpLog{deleted: false, lc: lc}
+	t.nodeOps[node] = op
 
 	return nil
 }
 
 // NewNode creates new node.
-func (t *Transaction) NewNode() (*Node, error) {
+func (t *Transaction) NewNode() (node *Node, err error) {
 	if err := t.Prefail(); err != nil { // reject in case of broken txn
 		return nil, err
 	}
 
-	if t.flags&txnFlagClusterLock == 0 {
+	if !t.MembershipModification() {
 		return nil, ErrTransactionCommitViolation
 	}
 
-	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
-
-	node := newNode(t.Cluster)
-	op := &nodeOpLog{deleted: false, lc: lc}
-	t.nodeOps[node] = op
-
-	return node, nil
+	node = newNode(t.Cluster)
+	return node, t._joinNode(node)
 }
 
 // MostPossibleNodeFromProtobuf finds most possible node to which the snapshot belongs.
@@ -310,32 +317,37 @@ func (t *Transaction) MostPossibleNode(names []string) *Node {
 }
 
 // RemoveNode removes node from cluster.
-func (t *Transaction) RemoveNode(node *Node) error {
+func (t *Transaction) RemoveNode(node *Node) (removed bool, err error) {
 	if node == nil || node.cluster != t.Cluster {
-		return ErrInvalidNode
+		return false, ErrInvalidNode
 	}
 	if err := t.Prefail(); err != nil { // reject in case of broken txn
-		return err
+		return false, err
 	}
-	if t.flags&txnFlagClusterLock == 0 {
-		return ErrTransactionCommitViolation
+	if !t.MembershipModification() {
+		return false, ErrTransactionCommitViolation
 	}
 
 	op, _ := t.nodeOps[node]
 	if op != nil {
 		if !op.deleted {
 			delete(t.nodeOps, node)
+			removed = true
 		}
 	} else if t.Cluster.containNodes(node) {
 		lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
 		op := &nodeOpLog{deleted: true, lc: lc}
 		t.nodeOps[node] = op
+		removed = true
 	} else {
-		return ErrInvalidNode
+		return false, ErrInvalidNode
 	}
 
-	return nil
+	return removed, nil
 }
+
+// MembershipModification checks whether the transaction has permission to update node set.
+func (t *Transaction) MembershipModification() bool { return t.flags&txnFlagClusterLock != 0 }
 
 // Names returns names of node.
 func (t *Transaction) Names(node *Node) []string {
@@ -346,58 +358,78 @@ func (t *Transaction) Names(node *Node) []string {
 	return node.getNames()
 }
 
-func appendDeferOps(ps *[]func(), fn func()) {
+func appendDeferOps(ps *[]*transactionFinalOp, fn func(), lc *uint32) {
 	if fn == nil {
 		return
 	}
-	*ps = append(*ps, fn)
+	*ps = append(*ps, &transactionFinalOp{
+		lc: atomic.AddUint32(lc, 1),
+		op: fn,
+	})
 }
 
 // Defer registers a function called before transaction exits.
-func (t *Transaction) Defer(fn func()) { appendDeferOps(&t.deferOps.normal, fn) }
+func (t *Transaction) Defer(fn func()) { appendDeferOps(&t.deferOps.normal, fn, &t.lc) }
 
 // DeferOnCommit registers a function called before transaction commits.
-func (t *Transaction) DeferOnCommit(fn func()) { appendDeferOps(&t.deferOps.onCommit, fn) }
+func (t *Transaction) DeferOnCommit(fn func()) { appendDeferOps(&t.deferOps.onCommit, fn, &t.lc) }
 
 // DeferOnRollback registers a function called before transaction rollbacks.
-func (t *Transaction) DeferOnRollback(fn func()) { appendDeferOps(&t.deferOps.onRollback, fn) }
+func (t *Transaction) DeferOnRollback(fn func()) { appendDeferOps(&t.deferOps.onRollback, fn, &t.lc) }
 
-func (t *Transaction) generateNameChanges() (finals []func(), err error) {
+func (t *Transaction) deferNameChanges() (err error) {
 	nameKeys := t.Cluster.resolver.Keys()
-	if len(nameKeys) < 1 {
-		return nil, nil
-	}
-	sort.Strings(nameKeys)
 
 	updates := make(map[*Node]struct{})
 
-	makeNameUpdateOp := func(node *Node, names []string) func() {
-		return func() { node.cluster._updateNodeName(node, names) }
-	}
-
-	for ref := range t.logs {
-		if sort.SearchStrings(nameKeys, ref.key) >= 0 {
-			updates[ref.node] = struct{}{}
-		}
-	}
-	for node := range updates {
-		kvs := make([]*KeyValue, 0, len(nameKeys))
-		for _, key := range nameKeys {
-			txn, err := t.KV(node, key)
-			if err != nil {
-				return nil, err
+	if len(nameKeys) > 0 {
+		sort.Strings(nameKeys)
+		for ref := range t.logs {
+			if sort.SearchStrings(nameKeys, ref.key) >= 0 {
+				updates[ref.node] = struct{}{}
 			}
-			value := txn.After()
-			kvs = append(kvs, &KeyValue{Key: key, Value: value})
 		}
-		names, err := t.Cluster.resolver.Resolve(kvs...)
-		if err != nil {
-			return nil, err
+	} else {
+		// If resolver requires no entry, names of node should be resolved when a node newly joins cluster.
+		for node, op := range t.nodeOps {
+			if !op.deleted { // created
+				updates[node] = struct{}{}
+			}
 		}
-		finals = append(finals, makeNameUpdateOp(node, names))
 	}
 
-	return finals, nil
+	if len(updates) > 0 {
+		t.Cluster.nodeIndexLock.Lock()
+		defer t.Defer(t.Cluster.nodeIndexLock.Unlock)
+
+		for node := range updates {
+			var kvs []*KeyValue = nil
+			if len(nameKeys) > 0 {
+				kvs = make([]*KeyValue, 0, len(nameKeys))
+				for _, key := range nameKeys {
+					if !t.KeyExists(node, key) {
+						continue
+					}
+					txn, err := t.KV(node, key)
+					if err != nil {
+						return err
+					}
+					value := txn.After()
+					kvs = append(kvs, &KeyValue{Key: key, Value: value})
+				}
+			}
+			names, err := t.Cluster.resolver.Resolve(kvs...)
+			if err != nil {
+				return err
+			}
+			if err = t.Cluster.updateNodeName(t, node, names); err != nil {
+				return err
+			}
+		}
+
+	}
+
+	return nil
 }
 
 // RangeNode iterates over nodes.
@@ -460,7 +492,7 @@ func (t *Transaction) cleanLocks() {
 	}
 }
 
-func (t *Transaction) commit() (finalOps []func()) {
+func (t *Transaction) commit() (finalOps []*transactionFinalOp) {
 	removedEntries, removedRefs := make([]*KeyValueEntry, 0), make([]*txnKeyRef, 0)
 
 	// node ops.
@@ -469,15 +501,12 @@ func (t *Transaction) commit() (finalOps []func()) {
 			continue
 		}
 		if log.deleted {
-			t.Cluster.removeNode(node)
+			t.Cluster._removeNode(node)
 		} else {
 			t.Cluster.emptyNodes[node] = struct{}{}
 			t.Cluster.emitEvent(EmptyNodeJoined, node)
 		}
 	}
-
-	finalOps = append(finalOps, t.deferOps.normal...)
-	finalOps = append(finalOps, t.deferOps.onCommit...)
 
 	for ref, log := range t.logs {
 		entry, exists := ref.node.kvs[ref.key]
@@ -496,7 +525,7 @@ func (t *Transaction) commit() (finalOps []func()) {
 				entry.Value = newValue
 				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue, ref.node.keyValueEntries(true))
 			}
-			finalOps = append(finalOps, entry.lock.Unlock)
+			t.Defer(entry.lock.Unlock)
 
 		} else if updated { // new: entry not exists and an update exists.
 			entry = &KeyValueEntry{
@@ -515,20 +544,24 @@ func (t *Transaction) commit() (finalOps []func()) {
 		t.Cluster.emitKeyDeletion(removedRefs[idx].node, entry.Key, entry.Value, removedRefs[idx].node.keyValueEntries(true))
 	}
 
-	finalOps = append(finalOps, t.cleanLocks) // unlock all.
+	t.Defer(t.cleanLocks) // unlock all.
+
+	finalOps = append(finalOps, t.deferOps.onCommit...)
+	finalOps = append(finalOps, t.deferOps.normal...)
 
 	return
 }
 
-func (t *Transaction) cancel() (finalOps []func()) {
-	finalOps = append(finalOps, t.deferOps.onRollback...)
+func (t *Transaction) cancel() (finalOps []*transactionFinalOp) {
 	for ref := range t.logs {
 		entry, exists := ref.node.kvs[ref.key]
 		if exists && entry != nil {
-			finalOps = append(finalOps, entry.lock.Unlock)
+			t.Defer(entry.lock.Unlock)
 		}
 	}
-	finalOps = append(finalOps, t.cleanLocks) // unlock all.
+	t.Defer(t.cleanLocks) // unlock all.
+	finalOps = append(finalOps, t.deferOps.onRollback...)
+	finalOps = append(finalOps, t.deferOps.normal...)
 	return
 }
 
@@ -625,6 +658,7 @@ func (t *Transaction) getLatestLog(n *Node, key string, create bool, lc uint32) 
 	// create entry transaction
 	if txn, err = validator.Txn(*snap); err != nil {
 		t.Cluster.log.Fatalf("validator of key \"%v\" failed to create transaction: " + err.Error())
+		return nil, false, err
 	}
 
 	// save

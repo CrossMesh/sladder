@@ -80,29 +80,20 @@ func (n *Node) keyValueEntries(clone bool) (entries []*KeyValue) {
 }
 
 // Delete remove KeyValue.
-func (n *Node) Delete(key string) (bool, error) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-
-	return n.delete(key)
-}
-
-func (n *Node) delete(key string) (bool, error) {
-	entry := n.getEntry(key)
-	if entry == nil {
-		return false, nil
-	}
-	accepted, err := entry.validator.Sync(&entry.KeyValue, nil)
-	if err != nil {
-		return false, err
-	}
-	if !accepted {
-		return false, ErrRejectedByValidator
+func (n *Node) Delete(key string) (delete bool, err error) {
+	var errs Errors
+	if err = n.cluster.Txn(func(t *Transaction) bool {
+		if err := t.Delete(n, key); err != nil {
+			errs = append(errs, err)
+			return false
+		}
+		return true
+	}); err != nil {
+		errs = append(errs, err)
 	}
 
-	delete(n.kvs, key)
-	n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
-	return true, nil
+	err = errs.AsError()
+	return err == nil, err
 }
 
 // Set sets KeyValue.
@@ -214,23 +205,34 @@ func (n *Node) get(key string) (entry *KeyValue) {
 	return &e.KeyValue
 }
 
-func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
+func deferReplaceValidator(t *Transaction, entry *KeyValueEntry, validator KVValidator) {
+	t.DeferOnCommit(func() {
+		entry.validator = validator
+	})
+}
 
-	entry, exists := n.kvs[key]
-	if !exists {
-		return
+func (n *Node) replaceValidator(t *Transaction, key string, validator KVValidator, forceReplace bool) error {
+	t.lockRelatedNode(n)
+
+	entry := n.getEntry(key)
+	if entry == nil {
+		return nil
 	}
 
-	// ensure that existing value is valid for new validator.
-	if !validator.Validate(entry.KeyValue) {
-		// drop entry in case of incompatiable validator.
-		delete(n.kvs, key)
-		n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
+	if validator == nil {
+		t.Delete(n, key) // unregister model.
 	} else {
-		entry.validator = validator // replace.
+		if !validator.Validate(entry.KeyValue) { // ensure that existing value is valid for new validator.
+			if !forceReplace {
+				return ErrIncompatibleValidator
+			}
+
+			// drop entry in case of incompatiable validator.
+			t.Delete(n, key)
+		}
+
+		deferReplaceValidator(t, entry, validator) // replace
 	}
 
-	return
+	return nil
 }

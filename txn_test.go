@@ -13,6 +13,15 @@ func TestTxn(t *testing.T) {
 		ei := &MockCoordinatingEngine{}
 		ei.MockEngineInstance.On("Init", mock.Anything).Return(nil)
 		ei.MockEngineInstance.On("Close").Return(nil)
+		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
+		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*TransactionOperation) bool {
+			for _, r := range rs {
+				if r.Txn != nil && (r.PastExists != r.Exists || r.Updated) {
+					return false
+				}
+			}
+			return true
+		})).Return(true, nil)
 
 		c, self, err := newTestFakedCluster(nil, ei, nil)
 		assert.NotNil(t, c)
@@ -43,7 +52,6 @@ func TestTxn(t *testing.T) {
 		ei.hook.start = nil
 
 		// normal commit
-		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key1").Return(nil, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key2").Return(nil, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, "key3").Return(nil, nil)
@@ -190,11 +198,19 @@ func TestTxn(t *testing.T) {
 	})
 
 	t.Run("txn_record_order", func(t *testing.T) {
+		var c *Cluster
+		var self *Node
+		var err error
+
 		ei := &MockCoordinatingEngine{}
 		ei.MockEngineInstance.On("Init", mock.Anything).Return(nil)
 		ei.MockEngineInstance.On("Close").Return(nil)
+		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
+		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(ops []*TransactionOperation) bool {
+			return c == nil || self == nil
+		})).Return(true, nil)
 
-		c, self, err := newTestFakedCluster(nil, ei, nil)
+		c, self, err = newTestFakedCluster(nil, ei, nil)
 		assert.NotNil(t, c)
 		assert.NotNil(t, self)
 		assert.NoError(t, err)
@@ -203,11 +219,22 @@ func TestTxn(t *testing.T) {
 
 		var lastOrder []*TransactionOperation
 
+		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(ops []*TransactionOperation) bool {
+			for _, op := range ops {
+				if op.Txn == nil {
+					return false
+				}
+				if op.Updated || op.PastExists != op.Exists {
+					return false
+				}
+			}
+			return true
+		})).Return(true, nil)
+
 		assert.NoError(t, c.RegisterKey("key1", m1, false, 0))
 		assert.NoError(t, c.RegisterKey("key2", m2, false, 0))
 		assert.NoError(t, c.RegisterKey("key3", m2, false, 0))
 		assert.NoError(t, c.RegisterKey("key4", m2, false, 0))
-		ei.MockTxnCoordinator.On("TransactionStart", mock.Anything).Return(true, nil)
 		ei.MockTxnCoordinator.On("TransactionBeginKV", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
 		ei.MockTxnCoordinator.On("TransactionCommit", mock.Anything, mock.MatchedBy(func(rs []*TransactionOperation) bool {
 			if len(rs) < 1 {

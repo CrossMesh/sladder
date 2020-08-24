@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sunmxt/sladder/util"
+	"github.com/crossmesh/sladder/util"
 )
 
 type TestRandomNameResolver struct {

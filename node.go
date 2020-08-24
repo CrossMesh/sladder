@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/sunmxt/sladder/proto"
+	"github.com/crossmesh/sladder/proto"
 )
 
 var (

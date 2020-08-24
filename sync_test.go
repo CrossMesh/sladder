@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/crossmesh/sladder/proto"
 	"github.com/stretchr/testify/assert"
-	"github.com/sunmxt/sladder/proto"
 )
 
 func TestSync(t *testing.T) {

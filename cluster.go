@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crossmesh/sladder/proto"
+	"github.com/crossmesh/sladder/util"
 	arbit "github.com/sunmxt/arbiter"
-	"github.com/sunmxt/sladder/proto"
-	"github.com/sunmxt/sladder/util"
 )
 
 var (

@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/crossmesh/sladder"
+	pb "github.com/crossmesh/sladder/engine/gossip/pb"
+	"github.com/crossmesh/sladder/proto"
+	"github.com/crossmesh/sladder/util"
 	"github.com/golang/protobuf/ptypes"
-	"github.com/sunmxt/sladder"
-	pb "github.com/sunmxt/sladder/engine/gossip/pb"
-	"github.com/sunmxt/sladder/proto"
-	"github.com/sunmxt/sladder/util"
 )
 
 func (e *EngineInstance) goClusterSync() {

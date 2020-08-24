@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossmesh/sladder"
 	"github.com/stretchr/testify/assert"
-	"github.com/sunmxt/sladder"
 )
 
 func dumpNodeKVEntry(buf *bytes.Buffer, entries []*sladder.KeyValue, before string) bool {

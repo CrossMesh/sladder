@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/sunmxt/sladder"
-	"github.com/sunmxt/sladder/util"
+	"github.com/crossmesh/sladder"
+	"github.com/crossmesh/sladder/util"
 )
 
 const (

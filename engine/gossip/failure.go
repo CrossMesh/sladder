@@ -4,9 +4,9 @@ import (
 	"container/heap"
 	"time"
 
+	"github.com/crossmesh/sladder"
+	"github.com/crossmesh/sladder/engine/gossip/pb"
 	"github.com/golang/protobuf/ptypes"
-	"github.com/sunmxt/sladder"
-	"github.com/sunmxt/sladder/engine/gossip/pb"
 )
 
 type suspection struct {

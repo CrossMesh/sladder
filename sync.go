@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/sunmxt/sladder/proto"
+	"github.com/crossmesh/sladder/proto"
 )
 
 // ResolveNodeNameFromProtobuf resolves node names from node snapshot.

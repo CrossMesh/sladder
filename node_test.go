@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/crossmesh/sladder/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/sunmxt/sladder/proto"
 )
 
 func TestNode(t *testing.T) {

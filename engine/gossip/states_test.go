@@ -3,8 +3,8 @@ package gossip
 import (
 	"testing"
 
+	"github.com/crossmesh/sladder"
 	"github.com/stretchr/testify/assert"
-	"github.com/sunmxt/sladder"
 )
 
 func TestSWIMTagValidator(t *testing.T) {

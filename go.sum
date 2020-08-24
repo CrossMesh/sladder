@@ -48,6 +48,8 @@ github.com/sunmxt/arbiter v0.0.0-20200426165013-aa5f1b9c6d2a h1:pY3K6dOMgcO5WPMD
 github.com/sunmxt/arbiter v0.0.0-20200426165013-aa5f1b9c6d2a/go.mod h1:ho/q3D4zCS2bqXEp+T+cfvXEbKy4JjC+HZF/iG3A5CA=
 github.com/sunmxt/arbiter v0.0.0-20200507185653-186784ed7c42 h1:t3r2Rd9WGI8scMFoXaS6jSO7MA5sdVCaTtLuuXCEaRc=
 github.com/sunmxt/arbiter v0.0.0-20200507185653-186784ed7c42/go.mod h1:b95FdWnbrapEuXxyn6zIzEpETHi/tULszyP5a1MIfA8=
+github.com/sunmxt/sladder v0.0.0-20200527072834-740c92fc4249 h1:WLB48b1JITo2craRQakQL5lS6dId9RV6R+MXopF1QlI=
+github.com/sunmxt/sladder v0.0.0-20200527072834-740c92fc4249/go.mod h1:xhoIujuM5LoB5QU4QUkPwO7M17oAQtG5NkzGCQwWpbM=
 github.com/vektra/mockery v0.0.0-20181123154057-e78b021dcbb5 h1:Xim2mBRFdXzXmKRO8DJg/FJtn/8Fj9NOEpO6+WuMPmk=
 github.com/vektra/mockery v0.0.0-20181123154057-e78b021dcbb5/go.mod h1:ppEjwdhyy7Y31EnHRDm1JkChoC7LXIJ7Ex0VYLWtZtQ=
 github.com/yuin/goldmark v1.1.27 h1:nqDD4MMMQA0lmWq03Z2/myGPYLQoXtmi0rGVs95ntbo=

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossmesh/sladder"
+	"github.com/crossmesh/sladder/util"
 	"github.com/stretchr/testify/assert"
-	"github.com/sunmxt/sladder"
-	"github.com/sunmxt/sladder/util"
 )
 
 type testClusterViewPoint struct {

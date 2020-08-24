@@ -1,7 +1,7 @@
 package gossip
 
 import (
-	"github.com/sunmxt/sladder"
+	"github.com/crossmesh/sladder"
 )
 
 // TransactionCommit is called before commit of a transaction.

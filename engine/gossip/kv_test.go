@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/crossmesh/sladder"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/sunmxt/sladder"
 )
 
 func TestKVWrapper(t *testing.T) {

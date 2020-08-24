@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/crossmesh/sladder/proto"
 	"github.com/stretchr/testify/assert"
 	mock "github.com/stretchr/testify/mock"
-	"github.com/sunmxt/sladder/proto"
 )
 
 type MockNodeNameKVResolver struct {

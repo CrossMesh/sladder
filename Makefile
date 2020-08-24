@@ -1,6 +1,6 @@
 .PHONY: test exec cover devtools env cloc proto mock
 
-GOMOD:=github.com/sunmxt/sladder
+GOMOD:=github.com/crossmesh/sladder
 
 PROJECT_ROOT:=$(shell pwd)
 BUILD_DIR:=build

@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"math/rand"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/crossmesh/sladder"
 	"github.com/crossmesh/sladder/engine/gossip/pb"
+	spb "github.com/crossmesh/sladder/proto"
 	"github.com/golang/protobuf/ptypes"
 	arbit "github.com/sunmxt/arbiter"
 	"google.golang.org/protobuf/proto"
@@ -29,7 +31,7 @@ type Transport interface {
 const (
 	defaultSuspectTimeout    = time.Minute * 5
 	defaultGossipPeriod      = time.Second
-	defaultMinimumRegionPeer = 2
+	defaultMinimumRegionPeer = 1
 	defaultSWIMTagKey        = "_swim_tag"
 )
 
@@ -75,17 +77,17 @@ func WithGossipPeriod(t time.Duration) sladder.EngineOption { return gossipPerio
 
 type manualSync struct{}
 
-// ManualSync disables sync.
+// ManualSync disables auto sync. (for testing)
 func ManualSync() sladder.EngineOption { return manualSync{} }
 
 type manualFailureDetect struct{}
 
-// ManualFailureDetect disables auto failure detection.
+// ManualFailureDetect disables auto failure detection. (for testing)
 func ManualFailureDetect() sladder.EngineOption { return manualFailureDetect{} }
 
 type manualClearSuspections struct{}
 
-// ManualClearSuspections disables auto suspections clearing.
+// ManualClearSuspections disables auto suspections clearing. (for testing)
 func ManualClearSuspections() sladder.EngineOption { return manualClearSuspections{} }
 
 // Engine provides methods to create gossip engine instance.
@@ -137,6 +139,12 @@ type EngineStatistics struct {
 	InSync       uint64
 }
 
+type leavingNode struct {
+	names    []string
+	snapshot *spb.Node
+	tagIdx   int
+}
+
 // EngineInstance is live gossip engine instance.
 type EngineInstance struct {
 	// parameters fields.
@@ -163,16 +171,19 @@ type EngineInstance struct {
 	innerTxnIDs sync.Map // map[uint32]struct{}
 
 	// sync fields.
-	messageCounter uint64
-	counterSeed    uint64
-	inSync         sync.Map                   // map[uint64]struct{}
-	leavingNodes   map[*sladder.Node]struct{} // leaving nodes.
+	messageCounter        uint64
+	counterSeed           uint64
+	inSync                sync.Map // map[uint64]struct{}
+	leavingNodes          []*leavingNode
+	leaveingNodeNameIndex map[string]int
+
+	// events.
+	pingTimeoutEvent    chan *sladder.Node // ping timeout event.
+	pingReqTimeoutEvent chan *sladder.Node // ping-req timeout event.
 
 	// failure detector fields
 	inPing              map[*sladder.Node]*pingContext  // nodes in ping progress
 	roundTrips          map[*sladder.Node]time.Duration // round-trip time trace.
-	pingTimeoutEvent    chan *sladder.Node              // ping timeout event.
-	pingReqTimeoutEvent chan *sladder.Node              // ping-req timeout event.
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
 	suspectionQueue     suspectionQueue                 // heap order by suspection.notAfter.
 
@@ -183,14 +194,19 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 	return &EngineInstance{
 		SuspectTimeout: defaultSuspectTimeout,
 		minRegionPeer:  defaultMinimumRegionPeer,
-		withRegion:     make(map[string]map[*sladder.Node]struct{}),
 		swimTagKey:     defaultSWIMTagKey,
 		log:            sladder.DefaultLogger,
 		GossipPeriod:   defaultGossipPeriod,
 		Fanout:         1,
 
+		withRegion: make(map[string]map[*sladder.Node]struct{}),
+
+		leaveingNodeNameIndex: make(map[string]int),
+
 		inPing:              make(map[*sladder.Node]*pingContext),
 		roundTrips:          make(map[*sladder.Node]time.Duration),
+		suspectionNodeIndex: make(map[*sladder.Node]*suspection),
+
 		pingTimeoutEvent:    make(chan *sladder.Node, 20),
 		pingReqTimeoutEvent: make(chan *sladder.Node, 20),
 		transport:           transport,
@@ -234,7 +250,8 @@ func (e *EngineInstance) tickGossipPeriodGo(proc func(time.Time)) {
 		proc(deadline)
 		if nextPeriod := e.getGossipPeriod(); nextPeriod != period { // period changed.
 			cancel()
-			e.goClusterSync()
+
+			go e.tickGossipPeriodGo(proc) // re-sched.
 		}
 	}, period, 1)
 }
@@ -285,7 +302,81 @@ func (e *EngineInstance) sendProto(names []string, body protoiface.MessageV1) {
 	e.transport.Send(names, raw)
 }
 
-func (e *EngineInstance) dispatchGossipMessage() {
+func (e *EngineInstance) dispatchEvents() {
+	for {
+		select {
+		case <-e.arbiter.Exit():
+		case node := <-e.pingReqTimeoutEvent:
+			e.processPingReqTimeout(node)
+
+		case node := <-e.pingTimeoutEvent:
+			e.processPingTimeout(node)
+		}
+	}
+}
+
+func (e *EngineInstance) _removeLeavingNode(index ...int) {
+	if len(index) < 1 {
+		return
+	}
+	sort.Ints(index)
+
+	depit := func(idx int) {
+		for _, name := range e.leavingNodes[idx].names {
+			delete(e.leaveingNodeNameIndex, name)
+		}
+	}
+
+	pit, flat, lpit := 0, len(e.leavingNodes), len(index)
+	prevPit, prevlastPit := -1, -1
+	for pit < lpit {
+		// search for pit.
+		newIdx := index[pit]
+		if newIdx < 0 || prevPit == newIdx {
+			pit++
+			continue
+		}
+
+		lastPit := index[lpit-1]
+		if lastPit < 0 || lastPit == prevlastPit { // de-dup
+			lpit--
+			continue
+		}
+		prevlastPit = flat - 1
+		if lastPit == flat-1 { // ptr to pit.
+			depit(flat - 1)
+			lpit--
+			flat--
+			continue
+		}
+
+		prevPit = newIdx
+
+		depit(newIdx)
+
+		e.leavingNodes[newIdx] = e.leavingNodes[flat-1]
+		for _, name := range e.leavingNodes[newIdx].names {
+			e.leaveingNodeNameIndex[name] = newIdx
+		}
+
+		pit++
+		flat--
+	}
+	e.leavingNodes = e.leavingNodes[:flat]
+
+}
+
+func (e *EngineInstance) dispatchGossipMessage(from []string, msg *pb.GossipMessage) {
+	switch msg.Type {
+	case pb.GossipMessage_Ack, pb.GossipMessage_Ping, pb.GossipMessage_PingReq:
+		e.processFailureDetectionProto(from, msg)
+
+	case pb.GossipMessage_Sync:
+		e.processSyncGossipProto(from, msg)
+	}
+}
+
+func (e *EngineInstance) pumpGossipMessage() {
 	var msg pb.GossipMessage
 
 	for e.arbiter.ShouldRun() {
@@ -297,46 +388,10 @@ func (e *EngineInstance) dispatchGossipMessage() {
 			e.log.Warn("invalid gossip message received, decoder got " + err.Error())
 			continue
 		}
-		switch msg.Type {
-		case pb.GossipMessage_Ack, pb.GossipMessage_Ping, pb.GossipMessage_PingReq:
-			e.processFailureDetectionProto(from, &msg)
 
-		case pb.GossipMessage_Sync:
-			e.processSyncGossipProto(from, &msg)
-		}
+		e.dispatchGossipMessage(from, &msg)
 	}
 
-}
-
-func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event sladder.Event, node *sladder.Node) {
-	switch event {
-	case sladder.EmptyNodeJoined:
-		if e.cluster.Self() == node {
-			e.onSelfSWIMTagMissing(node)
-		}
-
-	case sladder.NodeRemoved:
-		e.onNodeRemovedClearFailureDetector(node)
-		e.onNodeRemoved(node)
-	}
-}
-
-func (e *EngineInstance) onNodeRemoved(node *sladder.Node) {
-	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
-		r, err := t.KV(node, e.swimTagKey)
-		if err != nil {
-			e.log.Fatal("cannot access switm tag key in node removal txn from region map, got " + err.Error())
-			return false
-		}
-
-		e.lock.Lock()
-		defer e.lock.Unlock()
-		e.removeFromRegion(r.(*SWIMTagTxn).Region(), node, -1)
-
-		return false
-	}); err != nil {
-		e.log.Warn("failed txn when remove node from region map, got " + err.Error())
-	}
 }
 
 func (e *EngineInstance) insertToRegion(region string, node *sladder.Node) {
@@ -373,35 +428,8 @@ func (e *EngineInstance) updateRegion(old, new string, node *sladder.Node) {
 	e.insertToRegion(new, node)
 }
 
-func (e *EngineInstance) insertRegion(node *sladder.Node, tag *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.insertToRegion(tag.Region, node)
-}
-
-func (e *EngineInstance) updateRegionFromTag(node *sladder.Node, old, new *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.updateRegion(old.Region, new.Region, node)
-}
-
-func (e *EngineInstance) removeRegion(node *sladder.Node, tag *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.removeFromRegion(tag.Region, node, -1)
-}
-
 func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta sladder.KeyValueEventMetadata) {
 	switch meta.Event() {
-	case sladder.KeyInsert:
-		meta, tag := meta.(sladder.KeyInsertEventMetadata), &SWIMTag{}
-		if err := tag.Decode(meta.Key()); err != nil {
-			e.log.Fatal("cannot decode inserted swim tag, got " + err.Error())
-			break
-		}
-
-		e.insertRegion(meta.Node(), tag)
-
 	case sladder.ValueChanged:
 		old, new := &SWIMTag{}, &SWIMTag{}
 		meta := meta.(sladder.KeyChangeEventMetadata)
@@ -417,23 +445,8 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 		if meta.Node() == e.cluster.Self() {
 			e.onSelfSWIMStateChanged(meta.Node(), old, new)
 		} else {
-			e.traceSuspections(meta.Node(), new)
-			e.removeIfDead(meta.Node(), new)
-			e.removeIfLeft(meta.Node(), new)
+			e.removeIfDeadOrLeft(meta.Node(), new)
 		}
-		e.updateRegionFromTag(meta.Node(), old, new)
-
-	case sladder.KeyDelete:
-		meta, tag := meta.(sladder.KeyInsertEventMetadata), &SWIMTag{}
-		if err := tag.Decode(meta.Key()); err != nil {
-			e.log.Fatal("cannot decode deleted swim tag, got " + err.Error())
-			break
-		}
-
-		if meta.Node() == e.cluster.Self() {
-			e.onSelfSWIMTagMissing(meta.Node())
-		}
-		e.removeRegion(meta.Node(), tag)
 	}
 }
 
@@ -462,20 +475,22 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 		return err
 	}
 
-	// watch event to sync SWIM states.
-	c.Watch(e.onClusterEvent)
-	c.Keys(e.swimTagKey).Watch(e.onSWIMTagUpdated)
-
 	e.arbiter = arbit.New()
-	e.cluster = c
+
+	// watch event to sync SWIM states.
+	c.Keys(e.swimTagKey).Watch(e.onSWIMTagUpdated)
 
 	e.goClusterSync()   // start cluster sync process.
 	e.goDetectFailure() // start failure detection process.
 
-	e.arbiter.Go(func() { e.dispatchGossipMessage() })
+	e.arbiter.Go(func() { e.dispatchEvents() })
+	e.arbiter.Go(func() { e.pumpGossipMessage() })
 
 	return nil
 }
+
+// Inited returns true if engine has already inited.
+func (e *EngineInstance) Inited() bool { return e.arbiter != nil }
 
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
@@ -497,6 +512,7 @@ func (e *EngineInstance) Close() error {
 	}
 
 	// wait 5 gossip terms to spread the LEAVE state.
+	// TODO(xutao): we can safely quit after a successful gossip term.
 	beginSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs
 	e.tickGossipPeriodGo(func(deadline time.Time) {
 		newSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs

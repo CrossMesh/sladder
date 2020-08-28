@@ -289,12 +289,26 @@ func (t *SWIMTagTxn) SetRegion(region string) string {
 	return old
 }
 
+// ensureTransactionCommitIntegrity adds some missing necessary operations according to user operation logs.
 func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction, isEngineTxn bool, rcs []*sladder.TransactionOperation) (accepted bool, err error) {
 
 	addList, removeList := []string{}, []string{}
 	nodeOps := []*sladder.TransactionOperation{}
 
 	self := e.cluster.Self()
+	// ensure that SWIM tag exists.
+	if !t.KeyExists(self, e.swimTagKey) {
+		rtx, err := t.KV(self, e.swimTagKey)
+		if err != nil {
+			e.log.Fatalf("cannot get kv transaction when recovering from missing SWIM tag. (err = %v) ", err.Error())
+			return false, err
+		}
+		tag := rtx.(*SWIMTagTxn)
+		tag.SetRegion(e.Region)
+		tag.ClaimAlive()
+		tag.BumpVersion()
+	}
+
 	for idx := 0; idx < len(rcs); idx++ {
 		rc := rcs[idx]
 		if rc.Txn == nil { // node operation
@@ -311,7 +325,8 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 			}
 		}
 	}
-	if len(addList)+len(removeList) > 0 {
+
+	if len(addList)+len(removeList) > 0 { // sync existing keys to entry list.
 		rtx, err := t.KV(self, e.swimTagKey)
 		if err != nil {
 			e.log.Fatalf("engine cannot update entry list in swim tag. err = \"%v\"", err)
@@ -329,26 +344,6 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 	}
 
 	return true, nil
-}
-
-func (e *EngineInstance) onSelfSWIMTagMissing(self *sladder.Node) {
-	// TODO(xutao): add retry in case of failures.
-	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
-		{
-			rtx, err := t.KV(self, e.swimTagKey)
-			if err != nil {
-				e.log.Fatal("cannot get kv transaction when recovering from missing SWIM tag, got " + err.Error())
-				return false
-			}
-			tag := rtx.(*SWIMTagTxn)
-			tag.SetRegion(e.Region)
-			tag.ClaimAlive()
-			tag.BumpVersion()
-		}
-		return true
-	}); err != nil {
-		e.log.Fatal("cannot commit transaction when recovering from missing SWIM tag, got " + err.Error())
-	}
 }
 
 func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, old, new *SWIMTag) {

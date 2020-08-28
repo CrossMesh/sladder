@@ -29,7 +29,7 @@ cover: coverage test
 	go tool cover -html=$(COVERAGE_DIR)/coverage.out -o $(COVERAGE_DIR)/coverage.html
 
 test: coverage
-	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -timeout=30s -cover ./ ./engine/gossip
+	go test -v -coverprofile=$(COVERAGE_DIR)/coverage.out -timeout=120s -covermode=atomic -cover ./ ./engine/gossip
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 env:

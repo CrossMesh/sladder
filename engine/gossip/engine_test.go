@@ -51,7 +51,7 @@ func (g *testClusterGod) VPList() (vps []*testClusterViewPoint) {
 	return
 }
 
-func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool) {
+func ViewpointConsist(vps []*testClusterViewPoint, nodes, entries bool) (consist bool) {
 	consist = true
 
 	stopFn := func(s *string) bool {
@@ -63,14 +63,18 @@ func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool)
 
 	if nodes {
 		// node
-		for vp := range g.vps {
+		for _, vp := range vps {
 			nameList := []string{}
+			var nodes []*sladder.Node
 			vp.cv.RangeNodes(func(n *sladder.Node) bool {
+				nodes = append(nodes, n)
+				return true
+			}, false, false)
+			for _, n := range nodes {
 				names := n.Names()
 				sort.Strings(names)
 				nameList = append(nameList, "\""+strings.Join(names, "\",\"")+"\"")
-				return true
-			}, false, false)
+			}
 			sort.Strings(nameList)
 
 			if prevList != nil {
@@ -91,7 +95,7 @@ func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool)
 		}
 
 		prevList = nil
-		for vp := range g.vps {
+		for _, vp := range vps {
 			entriesList := []string{}
 
 			vp.cv.RangeNodes(func(n *sladder.Node) bool {
@@ -119,6 +123,10 @@ func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool)
 	return
 }
 
+func (g *testClusterGod) AllViewpointConsist(nodes, entries bool) (consist bool) {
+	return ViewpointConsist(g.VPList(), nodes, entries)
+}
+
 type mockTransportMessage struct {
 	msg  []byte
 	from []string
@@ -144,47 +152,271 @@ type MockTransport struct {
 	watcher map[chan struct{}]struct{}
 }
 
+type MockTransportRef struct {
+	source []string
+	*MockTransport
+}
+
+func (r *MockTransportRef) Send(names []string, buf []byte) {
+	mt := r.MockTransport
+	if mt == nil {
+		return
+	}
+	mt.Send(r.source, names, buf)
+}
+
+type networkJam struct {
+	from string
+	to   string
+}
+
+type networkPart struct {
+	group  int
+	nodeID int
+}
+
+type NetworkPartition struct {
+	groups  [][][]string
+	indices map[string]*networkPart
+}
+
+func (n *NetworkPartition) updateIndices() error {
+	n.indices = make(map[string]*networkPart)
+	for gid, group := range n.groups {
+		for nid, node := range group {
+			for _, name := range node {
+				if part, exists := n.indices[name]; exists {
+					return fmt.Errorf("group overlapped: %v is already in group %v", name, n.groups[part.group])
+				}
+				n.indices[name] = &networkPart{
+					group: gid, nodeID: nid,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (n *NetworkPartition) Jam(from, to []string) (exist bool) {
+	var gfrom, gto *networkPart
+
+	for _, from := range from {
+		for _, to := range to {
+			if gfrom, exist = n.indices[from]; !exist {
+				continue
+			}
+			if gto, exist = n.indices[to]; !exist {
+				continue
+			}
+			if gfrom.group == gto.group {
+				continue
+			}
+			return true
+		}
+	}
+
+	return false
+}
+
 type TestTransportControl struct {
-	lock                       sync.RWMutex
+	lock sync.RWMutex
+
 	condNewMessageGroupRelease *sync.Cond
 	concurrencyLeases          int32
 	messageGroup               uint32
 	messageGroupMetas          *mockMessageGroupMeta
 	messageGroupMetasTail      *mockMessageGroupMeta
-	transports                 map[string]Transport
+
+	transports map[string]*MockTransport
+
+	jams       map[networkJam]struct{}
+	partiation map[*NetworkPartition]struct{}
 
 	MaxConcurrentMessage int32
 }
 
 func NewTestTransportControl() (c *TestTransportControl) {
 	c = &TestTransportControl{
-		transports:           make(map[string]Transport),
-		MaxConcurrentMessage: 3,
+		transports:           make(map[string]*MockTransport),
+		MaxConcurrentMessage: 4,
 		concurrencyLeases:    0,
 		messageGroup:         0,
+		jams:                 make(map[networkJam]struct{}),
+		partiation:           make(map[*NetworkPartition]struct{}),
 	}
 	c.condNewMessageGroupRelease = sync.NewCond(&c.lock)
 	return
 }
 
-func (c *TestTransportControl) GetTransport(create bool, names ...string) (t *MockTransport) {
+func (c *TestTransportControl) networkJam(from, to string) {
+	c.jams[networkJam{
+		from: from, to: to,
+	}] = struct{}{}
+}
+
+func (c *TestTransportControl) NetworkJam(from, to string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.networkJam(from, to)
+}
+
+func (c *TestTransportControl) clearNetworkJam(from, to string) {
+	delete(c.jams, networkJam{
+		from: from, to: to,
+	})
+}
+
+func (c *TestTransportControl) ClearNetworkJam(from, to string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.clearNetworkJam(from, to)
+}
+
+func (c *TestTransportControl) networkInJam(names []string) {
+	for _, name := range names {
+		c.jams[networkJam{
+			from: "", to: name,
+		}] = struct{}{}
+	}
+}
+
+func (c *TestTransportControl) networkOutJam(names []string) {
+	for _, name := range names {
+		c.jams[networkJam{
+			from: name, to: "",
+		}] = struct{}{}
+	}
+}
+
+func (c *TestTransportControl) NetworkOutJam(names []string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.networkOutJam(names)
+}
+
+func (c *TestTransportControl) NetworkInJam(names []string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.networkInJam(names)
+}
+
+func (c *TestTransportControl) NetworkPartition(groups ...[][]string) (part *NetworkPartition, err error) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if len(groups) < 1 {
+		return nil, nil
+	}
+
+	getPart := func() *NetworkPartition {
+		if part == nil {
+			part = &NetworkPartition{
+				indices: make(map[string]*networkPart),
+			}
+		}
+		return part
+	}
+
+	for _, group := range groups {
+		nIdx, eliIdx := 0, 0
+		for ; nIdx < len(group); nIdx++ {
+			node := group[nIdx]
+			if len(node) < 1 {
+				continue
+			}
+			if eliIdx != nIdx {
+				node[eliIdx] = node[nIdx]
+			}
+			eliIdx++
+		}
+		group = group[:eliIdx]
+		if len(group) < 1 {
+			continue
+		}
+		part := getPart()
+		part.groups = append(part.groups, group)
+	}
+	if part != nil {
+		err = part.updateIndices()
+		c.partiation[part] = struct{}{}
+	}
+	return
+}
+
+func (c *TestTransportControl) RemovePartition(part *NetworkPartition) {
+	if part == nil {
+		return
+	}
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	return c.getTransport(create, names...)
+	delete(c.partiation, part)
 }
 
-func (c *TestTransportControl) getTransport(create bool, names ...string) (t *MockTransport) {
-	var mt *MockTransport
+func (c *TestTransportControl) JamDropMessage(from, to []string) bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
+	for _, from := range from {
+		if _, drop := c.jams[networkJam{
+			from: from, to: "",
+		}]; drop {
+			return true
+		}
+	}
+
+	for _, to := range to {
+		if _, drop := c.jams[networkJam{
+			from: "", to: to,
+		}]; drop {
+			return true
+		}
+	}
+
+	for _, from := range from {
+		for _, to := range to {
+			if _, drop := c.jams[networkJam{
+				from: from, to: to,
+			}]; drop {
+				return true
+			}
+		}
+	}
+
+	// check network partition.
+	for rule := range c.partiation {
+		if rule.Jam(from, to) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *TestTransportControl) getTransport(create bool, source []string, names ...string) (r *MockTransportRef) {
+	t := c.getMockTransport(create, names...)
+	if t == nil {
+		return nil
+	}
+
+	return &MockTransportRef{
+		source:        source,
+		MockTransport: t,
+	}
+}
+
+func (c *TestTransportControl) getMockTransport(create bool, names ...string) (mt *MockTransport) {
 	for _, name := range names {
 		t, hasTransport := c.transports[name]
 		if hasTransport && t != nil {
-			mt = t.(*MockTransport)
+			mt = t
 			break
 		}
 	}
-	if mt == nil && create {
+	if !create {
+		return
+	}
+
+	if mt == nil {
 		mt = &MockTransport{
 			names:   names,
 			c:       c,
@@ -193,9 +425,10 @@ func (c *TestTransportControl) getTransport(create bool, names ...string) (t *Mo
 		for _, name := range names {
 			c.transports[name] = mt
 		}
+
 	} else {
 		for _, name := range mt.names {
-			if t, _ := c.transports[name]; t != Transport(mt) {
+			if t, _ := c.transports[name]; t != mt {
 				delete(c.transports, name)
 			}
 		}
@@ -204,15 +437,17 @@ func (c *TestTransportControl) getTransport(create bool, names ...string) (t *Mo
 		}
 		mt.names = names
 		mt.c = c
+
 	}
 
 	return mt
 }
 
-func (c *TestTransportControl) Transport(names ...string) (t Transport) {
+func (c *TestTransportControl) Transport(source []string, names ...string) (t Transport) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	return c.getTransport(true, names...)
+
+	return c.getTransport(true, source, names...)
 }
 
 func (c *TestTransportControl) appendMessageGroup(numOfMsg int32, gid uint32) {
@@ -247,14 +482,14 @@ func (c *TestTransportControl) traceNewMessage() (gid uint32) {
 		for {
 			if c.concurrencyLeases > 0 {
 				c.concurrencyLeases--
-				break
+				return c.messageGroup
 			}
 			c.concurrencyLeases = rand.Int31n(c.MaxConcurrentMessage) + 1
 			c.messageGroup++
 			c.appendMessageGroup(c.concurrencyLeases, c.messageGroup)
 		}
 	}
-	return c.messageGroup
+	return
 }
 
 func (c *TestTransportControl) TraceNewMessage() (gid uint32) {
@@ -285,20 +520,20 @@ func (c *TestTransportControl) ReleaseMessage(gid uint32) {
 	c.releaseMessage(gid)
 }
 
-func (t *MockTransport) Send(names []string, buf []byte) {
-	target := t.c.GetTransport(false, names...)
-	if target == nil {
+func (t *MockTransport) Send(from []string, names []string, buf []byte) {
+	target := t.c.getMockTransport(false, names...)
+	if target == nil || t.c.JamDropMessage(from, names) {
 		return
-	}
-
-	m := &mockTransportMessage{
-		msg:  buf,
-		from: names,
-		gid:  t.c.TraceNewMessage(),
 	}
 
 	target.lock.Lock()
 	defer target.lock.Unlock()
+
+	m := &mockTransportMessage{
+		msg:  buf,
+		from: from,
+		gid:  t.c.TraceNewMessage(),
+	}
 
 	// enqueue
 	if target.mqh == nil {
@@ -368,6 +603,8 @@ func newClusterGod(namePrefix string, numOfName, numOfNode int,
 
 	god, ctl = newTestClusterGod(), NewTestTransportControl()
 
+	ctl.MaxConcurrentMessage = 32
+
 	//defer func() {
 	//	if err != nil {
 	//		for vp := range god.vps {
@@ -387,7 +624,7 @@ func newClusterGod(namePrefix string, numOfName, numOfNode int,
 
 		engineOptions = append(engineOptions, ManualClearSuspections(), ManualFailureDetect(), ManualSync())
 
-		vp.engine = New(ctl.Transport(names...), engineOptions...).(*EngineInstance)
+		vp.engine = New(ctl.Transport(names, names...), engineOptions...).(*EngineInstance)
 		vp.ns = &sladder.TestNamesInKeyNameResolver{
 			Key: "idkey",
 		}
@@ -427,7 +664,7 @@ func newClusterGod(namePrefix string, numOfName, numOfNode int,
 func TestGossipEngine(t *testing.T) {
 	t.Run("new_engine", func(t *testing.T) {
 		ctl := NewTestTransportControl()
-		tp := ctl.Transport("default")
+		tp := ctl.Transport([]string{"default"}, "default")
 
 		assert.Panics(t, func() {
 			New(nil)

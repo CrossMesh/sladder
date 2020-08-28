@@ -276,11 +276,14 @@ func (c *Cluster) RegisterKey(key string, validator KVValidator, forceReplace bo
 }
 
 func (c *Cluster) delayRemoveNode(n *Node) {
+	c.eventRegistry.queueLock.Lock()
+	defer c.eventRegistry.queueLock.Unlock()
+
 	c.eventRegistry.enqueueWork(func() {
 		var errs Errors
 
 		if err := c.Txn(func(t *Transaction) bool {
-			if _, err := t.RemoveNode(n); err != nil {
+			if _, err := t.RemoveNode(n); err != nil && err != ErrInvalidNode {
 				errs = append(errs, err)
 				return false
 			}

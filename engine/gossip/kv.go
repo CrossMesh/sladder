@@ -34,39 +34,51 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 			metas[op.Node] = meta
 		}
 
-		if op.Key == e.swimTagKey {
-			rtx, err := t.KV(op.Node, e.swimTagKey)
-			if err != nil {
-				e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
-				return false, err
-			}
-			meta.swim = rtx.(*SWIMTagTxn)
-			meta.oldTag = &SWIMTag{}
-			if err := meta.oldTag.Decode(meta.swim.Before()); err != nil {
-				e.log.Fatalf("failed to decode old SWIM tag. (err = \"%v\")", err)
-				return false, err
-			}
+		if op.Key != e.swimTagKey {
+			continue
+		}
 
-			if !op.Node.Anonymous() && // no rule for anonymous node
-				!isEngineTxn && // engine coordinator is allowed to do any operation.
-				self != op.Node { // self can apply any operation.
-				if op.PastExists == op.Exists {
-					if op.Updated { // seem to be modified.
-						modified := len(meta.swim.EntryList(false)) != len(meta.oldTag.EntryList)
-						if !modified {
-							// rule: modification of entry list is not allowed.
-							mark := func(s *string) bool { modified = true; return true }
-							util.RangeOverStringSortedSet(meta.swim.EntryList(false), meta.oldTag.EntryList, mark, mark, nil)
-						}
-						if modified {
-							return false, sladder.ErrTransactionCommitViolation
-						}
+		rtx, err := t.KV(op.Node, e.swimTagKey)
+		if err != nil {
+			e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
+			return false, err
+		}
+		meta.swim = rtx.(*SWIMTagTxn)
+		meta.oldTag = &SWIMTag{}
+		if err := meta.oldTag.Decode(meta.swim.Before()); err != nil {
+			e.log.Fatalf("failed to decode old SWIM tag. (err = \"%v\")", err)
+			return false, err
+		}
+
+		// limitations for safety:
+		root := op.Node.Anonymous() || // no rule for anonymous node
+			isEngineTxn || // engine coordinator is allowed to do any operation.
+			self == op.Node // self can apply any operation.
+
+		if !root {
+			if op.PastExists == op.Exists {
+				if op.Updated { // seem to be modified.
+					modified := len(meta.swim.EntryList(false)) != len(meta.oldTag.EntryList)
+					if !modified {
+						// rule: modification of entry list is not allowed.
+						mark := func(s *string) bool { modified = true; return true }
+						util.RangeOverStringSortedSet(meta.swim.EntryList(false), meta.oldTag.EntryList, mark, mark, nil)
 					}
-				} else { // delete or new.
-					return false, sladder.ErrTransactionCommitViolation
+					// rule: modification of region is not allowed.
+					modified = modified || meta.oldTag.Region != meta.swim.Region()
+
+					if modified {
+						return false, sladder.ErrTransactionCommitViolation
+					}
 				}
+			} else { // delete or new.
+				return false, sladder.ErrTransactionCommitViolation
 			}
 
+		} else {
+			if op.PastExists && !op.Exists && self == op.Node { // rule: reject removal SWIM tag myself.
+				return false, sladder.ErrTransactionCommitViolation
+			}
 		}
 	}
 

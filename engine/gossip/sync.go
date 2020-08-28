@@ -37,13 +37,15 @@ func (e *EngineInstance) newSyncClusterSnapshot(t *sladder.Transaction) (snap *p
 	}, false, true)
 
 	e.lock.Lock()
-	for leaving := range e.leavingNodes {
-		if poss := e.cluster.MostPossibleNode(leaving.Names()); poss != nil {
-			delete(e.leavingNodes, leaving)
+	removeIndics := []int{}
+	for idx, leaving := range e.leavingNodes {
+		if poss := t.MostPossibleNode(leaving.names); poss != nil {
+			removeIndics = append(removeIndics, idx)
 		}
 	}
-	for node := range e.leavingNodes {
-		readSnap(node)
+	e._removeLeavingNode(removeIndics...)
+	for _, node := range e.leavingNodes {
+		snap.Nodes = append(snap.Nodes, node.snapshot)
 	}
 	e.lock.Unlock()
 
@@ -148,8 +150,8 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 				}
 			}
 
-			if node == nil { // no related node found.
-				// check swim tag.
+			if node == nil { // no related node found in cluster.
+				// stage: check swim tag.
 				if tagKeyIndex < 0 {
 					e.log.Warn("drop a node without swim tag.")
 					continue
@@ -165,6 +167,71 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					continue
 				}
 
+				// stage: check whether node is in leaving state.
+				var leaving *leavingNode
+				{
+					hist, max, hit := make(map[int]uint), uint(0), -1
+					e.lock.RLock()
+					for _, name := range names {
+						idx, hasNode := e.leaveingNodeNameIndex[name]
+						if !hasNode {
+							continue
+						}
+
+						cnt, exists := hist[idx]
+						if !exists {
+							cnt = 0
+						}
+						cnt++
+						hist[idx] = cnt
+						if cnt > max {
+							hit, max = idx, cnt
+						}
+					}
+					if hit >= 0 {
+						leaving = e.leavingNodes[hit]
+					}
+					e.lock.RUnlock()
+				}
+				if leaving != nil {
+					leavingTagIdx, oldSnapshot := leaving.tagIdx, leaving.snapshot
+					if len(oldSnapshot.Kvs) <= leavingTagIdx {
+						e.log.Warnf("[BUG!] tagIdx in leaving node exceeds length of snapshot. {node = %v, invalid_index = %v}", leaving.names, leavingTagIdx)
+						leavingTagIdx = -1
+					}
+					if leavingTagIdx >= 0 {
+						if key := oldSnapshot.Kvs[leavingTagIdx].Key; key != e.swimTagKey {
+							e.log.Warnf("[BUG!] tagIdx in leaving node points to another entry instead of SWIM tag. {node = %v, invalid_index = %v, mispoint_entry_key = %v}", leaving.names, leavingTagIdx, key)
+							leavingTagIdx = -1
+						}
+					}
+					if leavingTagIdx < 0 {
+						for idx, entry := range oldSnapshot.Kvs {
+							if entry.Key == e.swimTagKey {
+								leavingTagIdx = idx
+								break
+							}
+						}
+					}
+					if leavingTagIdx < 0 {
+						e.log.Warnf("[BUG!] a leaving node is with no SWIM tag. {node = %v}", leaving.names)
+						e.untraceLeaveingNode(leaving)
+					} else {
+						raw, leavingTag := leaving.snapshot.Kvs[leavingTagIdx].Value, &SWIMTag{}
+						if err := leavingTag.Decode(raw); err != nil {
+							e.log.Warnf("a leaving node is with invalid SWIM tag. (decode err = \"%v\").", err.Error())
+							e.untraceLeaveingNode(leaving)
+							node = nil
+						} else if tag.Version <= leavingTag.Version {
+							// this is a lag message. won't be accepted.
+							continue
+						} else {
+							node = nil // seem to be revived. accept it but should be as a new node.
+						}
+					}
+				}
+
+				// now, it's certainly a new node.
 				if newNode == nil { // allocate a new node.
 					if newNode, err = t.NewNode(); err != nil {
 						errs = append(errs, err, fmt.Errorf("cannot create new node"))

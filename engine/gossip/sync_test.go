@@ -2,6 +2,7 @@ package gossip
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -25,31 +26,39 @@ func dumpNodeKVEntry(buf *bytes.Buffer, entries []*sladder.KeyValue, before stri
 	return true
 }
 
+func dumpSingleViewPoint(t *testing.T, vp *testClusterViewPoint, names, kv bool) {
+	if !names && !kv {
+		return
+	}
+
+	if names {
+		nodeNames := []interface{}{}
+		vp.cv.RangeNodes(func(n *sladder.Node) bool {
+			nodeNames = append(nodeNames, n.PrintableName())
+			return true
+		}, false, false)
+		t.Log("self =", vp.cv.Self().PrintableName(), ",all =", nodeNames)
+	} else {
+		t.Log("self =", vp.cv.Self().PrintableName())
+	}
+	if kv {
+		vp.cv.RangeNodes(func(n *sladder.Node) bool {
+			entries := n.KeyValueEntries(true)
+			t.Log("    node = ", n.PrintableName(), "entry count = ", len(entries))
+			for _, entry := range entries {
+				t.Log("      key = ", entry.Key, "  value = ", entry.Value)
+			}
+			return true
+		}, false, false)
+	}
+}
+
 func dumpViewPoint(t *testing.T, vps []*testClusterViewPoint, names, kv bool) bool {
 	if !names && !kv {
 		return false
 	}
 	for _, vp := range vps {
-		if names {
-			nodeNames := []interface{}{}
-			vp.cv.RangeNodes(func(n *sladder.Node) bool {
-				nodeNames = append(nodeNames, n.PrintableName())
-				return true
-			}, false, false)
-			t.Log("self =", vp.cv.Self().PrintableName(), ",all =", nodeNames)
-		} else {
-			t.Log("self =", vp.cv.Self().PrintableName())
-		}
-		if kv {
-			vp.cv.RangeNodes(func(n *sladder.Node) bool {
-				entries := n.KeyValueEntries(true)
-				t.Log("    node = ", n.PrintableName(), "entry count = ", len(entries))
-				for _, entry := range entries {
-					t.Log("      key = ", entry.Key, "  value = ", entry.Value)
-				}
-				return true
-			}, false, false)
-		}
+		dumpSingleViewPoint(t, vp, names, kv)
 	}
 
 	return true
@@ -72,7 +81,7 @@ func dumpEntryDiff(buf *bytes.Buffer, olds, news []*sladder.KeyValue, before str
 
 	logDeletion := func(e *sladder.KeyValue) {
 		dumpBefore()
-		buf.WriteString("[deletion]     key = " + e.Key + ", value = " + e.Value)
+		buf.WriteString("[deletion]     key = " + e.Key + ", value = " + e.Value + "\n")
 	}
 	logChange := func(ori, new *sladder.KeyValue) {
 		dumpBefore()
@@ -112,24 +121,31 @@ func dumpEntryDiff(buf *bytes.Buffer, olds, news []*sladder.KeyValue, before str
 	return dumpedBefore
 }
 
-func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int, visitRound func(int) bool, logNames, logKV bool) int {
+func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int,
+	visitRound func(int) bool, logNames, logKV, dumpInitial bool,
+	syncFun func(*EngineInstance)) int {
 	type snapshot struct {
 		name       string
 		entries    []*sladder.KeyValue
 		matchCount int
+		node       *sladder.Node
 	}
 
 	var snaps map[*testClusterViewPoint][]*snapshot
 
 	logBuf := bytes.NewBuffer(nil)
 
-	dump := func() {
+	dump := func(round int) {
 		hasSnaps := snaps != nil
 		if !hasSnaps {
 			snaps = make(map[*testClusterViewPoint][]*snapshot)
-			if dumpViewPoint(t, vps, logNames, logKV) {
+			if dumpInitial && dumpViewPoint(t, vps, logNames, logKV) {
 				t.Log("dump initial states finished...")
 			}
+		}
+
+		if !logKV && !logNames {
+			return
 		}
 
 		for _, vp := range vps {
@@ -137,11 +153,14 @@ func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int, visitRound f
 			inlSnap := make([]*snapshot, 0, len(vps))
 			vp.cv.RangeNodes(func(n *sladder.Node) bool {
 				inlSnap = append(inlSnap, &snapshot{
-					name:    n.PrintableName(),
-					entries: n.KeyValueEntries(true),
+					name: n.PrintableName(),
+					node: n,
 				})
 				return true
 			}, false, false)
+			for _, snap := range inlSnap {
+				snap.entries = snap.node.KeyValueEntries(true)
+			}
 			sort.Slice(inlSnap, func(i, j int) bool { return inlSnap[i].name < inlSnap[j].name })
 
 			prev, hasSnap := snaps[vp]
@@ -159,7 +178,9 @@ func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int, visitRound f
 							// dump diffs
 							matched = true
 							match.matchCount++
-							dumped = dumped || dumpEntryDiff(logBuf, match.entries, snap.entries, "node = "+snap.name)
+							if logKV {
+								dumped = dumped || dumpEntryDiff(logBuf, match.entries, snap.entries, "node = "+snap.name)
+							}
 						}
 					}
 					if !matched {
@@ -184,22 +205,28 @@ func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int, visitRound f
 
 			snaps[vp] = inlSnap
 		}
+
+		t.Log("sync round", round, "finished")
 	}
 
 	i := 0
 	cont := visitRound(i)
-	dump()
+	dump(0)
+	if syncFun == nil {
+		syncFun = func(e *EngineInstance) {
+			e.ClusterSync()
+		}
+	}
 	for i < round && cont {
 		for _, vp := range vps {
-			vp.engine.ClusterSync()
+			syncFun(vp.engine)
 		}
 		time.Sleep(time.Millisecond * 1)
 		for _, vp := range vps {
 			vp.cv.EventBarrier()
 		}
 		cont = visitRound(i)
-		dump()
-		t.Log("sync round", i, "finished")
+		dump(i + 1)
 		if !cont {
 			break
 		}
@@ -208,8 +235,63 @@ func syncLoop(t *testing.T, vps []*testClusterViewPoint, round int, visitRound f
 	return i
 }
 
-func TestGossipEngineSync(t *testing.T) {
+func newHealthyClusterGod(t *testing.T, namePrefix string, numOfName, numOfNode int,
+	engineOptions []sladder.EngineOption,
+	clusterOptions []sladder.ClusterOption) (god *testClusterGod, ctl *TestTransportControl, err error) {
 
+	god, ctl, err = newClusterGod("tst", numOfName, numOfNode, engineOptions, clusterOptions)
+
+	assert.NotNil(t, god)
+	assert.NotNil(t, ctl)
+	assert.NoError(t, err)
+
+	vps := god.VPList()
+	for i := 1; i < len(vps); i++ {
+		vp, nvp := vps[i-1], vps[i]
+
+		n, err := vp.cv.NewNode()
+		assert.NoError(t, err)
+		if !assert.NoError(t, err) {
+			break
+		}
+		if terr := vp.cv.Txn(func(t *sladder.Transaction) bool {
+			{
+				rtx, ierr := t.KV(n, "idkey")
+				if ierr != nil {
+					err = ierr
+					return false
+				}
+				tx := rtx.(*sladder.TestNamesInKeyTxn)
+				tx.AddName(nvp.cv.Self().Names()...)
+			}
+			return true
+		}); !assert.NoError(t, terr) {
+			break
+		}
+		if !assert.NoError(t, err) {
+			break
+		}
+	}
+
+	consistAt := syncLoop(t, vps, 500,
+		func(round int) bool { return !god.AllViewpointConsist(true, true) },
+		false, false, false, nil)
+	if consistAt >= 500 {
+		err = errors.New("base cluster: node entry cannot be consist within 500 round")
+	}
+	t.Log("newly created healthy cluster is consist at round", consistAt)
+	nodeNames, vp := []interface{}{}, vps[0]
+	vp.cv.RangeNodes(func(n *sladder.Node) bool {
+		nodeNames = append(nodeNames, n.PrintableName())
+		return true
+	}, false, false)
+	t.Log("one of view:")
+	dumpSingleViewPoint(t, vps[0], true, true)
+
+	return god, ctl, nil
+}
+
+func TestGossipEngineSync(t *testing.T) {
 	god, ctl, err := newClusterGod("tst", 2, 10, nil, nil)
 
 	assert.NotNil(t, god)
@@ -260,7 +342,7 @@ func TestGossipEngineSync(t *testing.T) {
 	t.Run("basic_sync", func(t *testing.T) {
 		consistAt := syncLoop(t, vps, 500, func(round int) bool {
 			return !god.AllViewpointConsist(true, false)
-		}, true, false)
+		}, true, false, true, nil)
 		assert.Less(t, consistAt, 500, "node entry cannot be consist within 500 round.")
 		t.Log("cluster is consist at round", consistAt)
 	})
@@ -334,7 +416,7 @@ func TestGossipEngineSync(t *testing.T) {
 			t.Log("initial modified states dump finished.")
 			consistAt := syncLoop(t, vps, 500, func(round int) bool {
 				return !god.AllViewpointConsist(true, true)
-			}, false, true)
+			}, false, true, false, nil)
 			assert.Less(t, consistAt, 500, "node entry cannot be consist within 500 round.")
 			t.Log("cluster is consist at round", consistAt)
 		})
@@ -351,7 +433,7 @@ func TestGossipEngineSync(t *testing.T) {
 			t.Log("dump initial state finished.")
 			consistAt := syncLoop(t, vps, 500, func(round int) bool {
 				return !god.AllViewpointConsist(true, true)
-			}, false, true)
+			}, false, true, false, nil)
 			assert.Less(t, consistAt, 500, "node entry cannot be consist within 500 round.")
 			t.Log("cluster is consist at round ", consistAt)
 		})
@@ -417,7 +499,7 @@ func TestGossipEngineSync(t *testing.T) {
 			t.Log("dump initial state finished.")
 			consistAt := syncLoop(t, vps, 500, func(round int) bool {
 				return !god.AllViewpointConsist(true, true)
-			}, false, true)
+			}, false, true, false, nil)
 			assert.Less(t, consistAt, 500, "node entry cannot be consist within 500 round.")
 			t.Log("cluster is consist at round", consistAt)
 		})

@@ -91,20 +91,24 @@ func (e *EngineInstance) ClusterSync() {
 
 	setTimeout := func(id uint64) {
 		time.AfterFunc(e.getGossipPeriod()*10, func() {
-			e.inSync.Delete(id)
-			atomic.AddUint64(&e.statistics.TimeoutSyncs, 1)
+			if _, exists := e.inSync.Load(id); exists {
+				atomic.AddUint64(&e.Metrics.Sync.Timeout, 1)
+				atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF)
+				e.inSync.Delete(id)
+			}
 		})
 	}
 
 	for _, node := range nodes {
 		id := e.generateMessageID()
-		atomic.AddUint64(&e.statistics.InSync, 1)
 		e.inSync.Store(id, node)
 		setTimeout(id)
 		e.sendProto(node, &pb.Sync{
 			Id:      id,
 			Cluster: snap,
 		})
+
+		atomic.AddUint64(&e.Metrics.Sync.InProgress, 1)
 	}
 }
 
@@ -329,13 +333,16 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			isResponse = true
 			return false
 		})
-		atomic.AddUint64(&e.statistics.InSync, 0xFFFFFFFFFFFFFFFF) // -1
-		atomic.AddUint64(&e.statistics.FinishedSync, 1)
+		atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF) // -1
 	}
 
 	if isResponse {
+		atomic.AddUint64(&e.Metrics.Sync.Success, 1)
 		e.inSync.Delete(sync.Id)
+
 	} else {
+		atomic.AddUint64(&e.Metrics.Sync.Incoming, 1)
+
 		e.sendProto(from, &pb.Sync{
 			Id:      sync.Id,
 			Cluster: snap,

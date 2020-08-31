@@ -2,6 +2,8 @@ package gossip
 
 import (
 	"container/heap"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crossmesh/sladder"
@@ -44,9 +46,12 @@ type proxyPingRequest struct {
 }
 
 type pingContext struct {
+	lock     sync.Mutex
 	id       uint64
 	start    time.Time
 	proxyFor []*proxyPingRequest
+
+	indirects uint32
 }
 
 func (e *EngineInstance) goDetectFailure() {
@@ -66,7 +71,20 @@ func (e *EngineInstance) goDetectFailure() {
 
 func (e *EngineInstance) _clearNodeFromFailureDetector(node *sladder.Node) {
 	// remove node from all failure detector fields.
-	delete(e.inPing, node)
+	if ctx, exist := e.inPing[node]; exist {
+		ctx.lock.Lock()
+		// update metrics.
+		if ctx.indirects > 0 {
+			atomic.AddUint32(&e.Metrics.FailureDetector.PingIndirect, -ctx.indirects)
+		}
+		if numOfProxied := len(ctx.proxyFor); numOfProxied > 0 {
+			atomic.AddUint64(&e.Metrics.FailureDetector.ProxyFailure, uint64(numOfProxied))
+		}
+		ctx.lock.Unlock()
+		atomic.AddUint32(&e.Metrics.FailureDetector.Ping, 0xFFFFFFFF)
+
+		delete(e.inPing, node)
+	}
 	delete(e.roundTrips, node)
 	if s, _ := e.suspectionNodeIndex[node]; s != nil {
 		heap.Remove(&e.suspectionQueue, s.queueIndex)
@@ -113,6 +131,20 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 	}
 	var stateUpdates []*stateUpdation
 
+	stateMetricsInc := &StateMetrics{}
+	addStateMetricsByState := func(state SWIMState, n uint32) {
+		switch state {
+		case ALIVE:
+			stateMetricsInc.Alive += n
+		case SUSPECTED:
+			stateMetricsInc.Suspected += n
+		case DEAD:
+			stateMetricsInc.Dead += n
+		case LEFT:
+			stateMetricsInc.Left += n
+		}
+	}
+
 	for node, idx := range nodes {
 		rtx, err := t.KV(node, e.swimTagKey)
 		if err != nil {
@@ -132,8 +164,13 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 			}
 			if op.NodeExists { // insert.
 				regionOp.insertions = append(regionOp.insertions, param)
+
+				addStateMetricsByState(tag.State(), 1) // state metrics incremental.
+
 			} else { // deletion.
 				regionOp.deletions = append(regionOp.deletions, param)
+
+				addStateMetricsByState(tag.State(), 0xFFFFFFFF) // state metrics incremental.
 			}
 		} else if !rtx.Updated() { // tag not updated.
 			continue
@@ -147,6 +184,9 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 				stateUpdates = append(stateUpdates, &stateUpdation{
 					node: node, new: new,
 				})
+
+				addStateMetricsByState(old, 0xFFFFFFFF) // state metrics incremental.
+				addStateMetricsByState(new, 1)          // state metrics incremental.
 			}
 		}
 	}
@@ -162,6 +202,8 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 			len(stateUpdates) <= 0 {
 			return
 		}
+
+		e.Metrics.State.AtomicAdd(stateMetricsInc)
 
 		e.lock.Lock()
 		defer e.lock.Unlock()
@@ -426,7 +468,7 @@ func (e *EngineInstance) ping(node *sladder.Node, proxyReq *proxyPingRequest) {
 
 	if pingCtx == nil { // not in progres.
 		id := e.generateMessageID()
-		e.sendProto(node.Names(), &pb.Ping{
+		defer e.sendProto(node.Names(), &pb.Ping{
 			Id: id,
 		})
 
@@ -441,10 +483,15 @@ func (e *EngineInstance) ping(node *sladder.Node, proxyReq *proxyPingRequest) {
 		})
 
 		e.inPing[node] = pingCtx
+		atomic.AddUint32(&e.Metrics.FailureDetector.Ping, 1)
 	}
 
 	if proxyReq != nil {
+		pingCtx.lock.Lock()
 		pingCtx.proxyFor = append(pingCtx.proxyFor, proxyReq)
+		pingCtx.lock.Unlock()
+
+		atomic.AddUint32(&e.Metrics.FailureDetector.ProxyPing, 1)
 	}
 }
 
@@ -469,17 +516,26 @@ func (e *EngineInstance) onPingAck(from []string, msg *pb.Ack) {
 		return
 	}
 
+	pingCtx.lock.Lock()
+	defer pingCtx.lock.Unlock()
+
 	// save estimated round-trip time.
 	rtt := time.Now().Sub(pingCtx.start)
 	e.roundTrips[node] = rtt
 
-	for _, pingReq := range pingCtx.proxyFor {
-		// ack for all related ping-req.
-		e.sendProto(pingReq.origin, &pb.Ack{
-			NamesProxyFor: pingReq.target,
-			Id:            pingReq.id,
-		})
+	if numOfProxied := len(pingCtx.proxyFor); numOfProxied > 0 {
+		for _, pingReq := range pingCtx.proxyFor {
+			// ack for all related ping-req.
+			e.sendProto(pingReq.origin, &pb.Ack{
+				NamesProxyFor: pingReq.target,
+				Id:            pingReq.id,
+			})
+		}
+		atomic.AddUint64(&e.Metrics.FailureDetector.ProxySuccess, uint64(numOfProxied))
 	}
+
+	atomic.AddUint32(&e.Metrics.FailureDetector.Ping, 0xFFFFFFFF) // -1
+	atomic.AddUint64(&e.Metrics.FailureDetector.Success, 1)
 
 	delete(e.inPing, node)
 }
@@ -514,18 +570,22 @@ func (e *EngineInstance) processPingTimeout(node *sladder.Node) {
 	}
 
 	timeout := time.Duration(0)
+	pingCtx.lock.Lock()
 	for _, proxy := range e.selectRandomNodes(e.getPingProxiesCount(), true) {
 		if proxy == node {
 			continue
 		}
 
 		e.sendProto(proxy.Names(), req) // ping-req.
+		pingCtx.indirects++
 
 		// find minimal proxier round-trip.
 		if rtt := e.estimatedRoundTrip(proxy); timeout < 1 || rtt < timeout {
 			timeout = rtt
 		}
 	}
+	atomic.AddUint32(&e.Metrics.FailureDetector.PingIndirect, pingCtx.indirects)
+	pingCtx.lock.Unlock()
 
 	if gossipPeriod := e.getGossipPeriod(); gossipPeriod > timeout {
 		timeout = gossipPeriod
@@ -562,8 +622,18 @@ func (e *EngineInstance) processPingReqTimeout(node *sladder.Node) {
 	}
 
 	e.lock.Lock()
-	delete(e.inPing, node)
+	if _, exist := e.inPing[node]; exist {
+		delete(e.inPing, node)
+		atomic.AddUint32(&e.Metrics.FailureDetector.Ping, 0xFFFFFFFF)
+		atomic.AddUint64(&e.Metrics.FailureDetector.Failure, 1)
+	}
 	e.lock.Unlock()
+
+	pingCtx.lock.Lock()
+	if pingCtx.indirects > 0 {
+		atomic.AddUint32(&e.Metrics.FailureDetector.PingIndirect, -pingCtx.indirects)
+	}
+	pingCtx.lock.Unlock()
 }
 
 func (e *EngineInstance) onPingReq(from []string, msg *pb.PingReq) {
@@ -573,6 +643,7 @@ func (e *EngineInstance) onPingReq(from []string, msg *pb.PingReq) {
 
 	node := e.cluster.MostPossibleNode(msg.Name)
 	if node == nil {
+		atomic.AddUint64(&e.Metrics.FailureDetector.ProxyFailure, 1)
 		return
 	}
 

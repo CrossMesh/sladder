@@ -132,13 +132,6 @@ func New(transport Transport, options ...sladder.EngineOption) sladder.EngineIns
 	return instance
 }
 
-// EngineStatistics collects gossip engine statistics.
-type EngineStatistics struct {
-	FinishedSync uint64
-	TimeoutSyncs uint64
-	InSync       uint64
-}
-
 type leavingNode struct {
 	names    []string
 	snapshot *spb.Node
@@ -187,7 +180,7 @@ type EngineInstance struct {
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
 	suspectionQueue     suspectionQueue                 // heap order by suspection.notAfter.
 
-	statistics EngineStatistics
+	Metrics Metrics
 }
 
 func newInstanceDefault(transport Transport) *EngineInstance {
@@ -225,6 +218,9 @@ func (e *EngineInstance) getGossipFanout() int32 {
 	if fanout < 1 {
 		return 1
 	}
+
+	atomic.StoreUint32(&e.Metrics.GossipFanout, uint32(fanout))
+
 	return fanout
 }
 
@@ -246,6 +242,9 @@ func (e *EngineInstance) getMinPingReqTimeoutTimes() uint {
 
 func (e *EngineInstance) tickGossipPeriodGo(proc func(time.Time)) {
 	period := e.getGossipPeriod()
+
+	atomic.StoreUint64(&e.Metrics.GossipPeriod, uint64(period))
+
 	e.arbiter.TickGo(func(cancel func(), deadline time.Time) {
 		proc(deadline)
 		if nextPeriod := e.getGossipPeriod(); nextPeriod != period { // period changed.
@@ -513,9 +512,9 @@ func (e *EngineInstance) Close() error {
 
 	// wait 5 gossip terms to spread the LEAVE state.
 	// TODO(xutao): we can safely quit after a successful gossip term.
-	beginSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs
+	beginSyncTerm := e.Metrics.Sync.Success
 	e.tickGossipPeriodGo(func(deadline time.Time) {
-		newSyncTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs
+		newSyncTerm := e.Metrics.Sync.Success
 		if newSyncTerm-beginSyncTerm < 5 {
 			return
 		}

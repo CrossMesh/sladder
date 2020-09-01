@@ -2,15 +2,20 @@ package gossip
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"math/rand"
 	"reflect"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/crossmesh/sladder"
+	"github.com/crossmesh/sladder/engine/gossip/pb"
+	spb "github.com/crossmesh/sladder/proto"
 	"github.com/golang/protobuf/ptypes"
 	arbit "github.com/sunmxt/arbiter"
-	"github.com/sunmxt/sladder"
-	"github.com/sunmxt/sladder/engine/gossip/pb"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/runtime/protoiface"
 )
@@ -26,7 +31,7 @@ type Transport interface {
 const (
 	defaultSuspectTimeout    = time.Minute * 5
 	defaultGossipPeriod      = time.Second
-	defaultMinimumRegionPeer = 2
+	defaultMinimumRegionPeer = 1
 	defaultSWIMTagKey        = "_swim_tag"
 )
 
@@ -37,7 +42,7 @@ func WithMinRegionPeer(min uint) sladder.EngineOption {
 	if min < 1 {
 		min = 1
 	}
-	return min
+	return minRegionPeer(min)
 }
 
 type region string
@@ -70,15 +75,30 @@ type gossipPeriod time.Duration
 // WithGossipPeriod creates option of gossip period.
 func WithGossipPeriod(t time.Duration) sladder.EngineOption { return gossipPeriod(t) }
 
+type manualSync struct{}
+
+// ManualSync disables auto sync. (for testing)
+func ManualSync() sladder.EngineOption { return manualSync{} }
+
+type manualFailureDetect struct{}
+
+// ManualFailureDetect disables auto failure detection. (for testing)
+func ManualFailureDetect() sladder.EngineOption { return manualFailureDetect{} }
+
+type manualClearSuspections struct{}
+
+// ManualClearSuspections disables auto suspections clearing. (for testing)
+func ManualClearSuspections() sladder.EngineOption { return manualClearSuspections{} }
+
 // Engine provides methods to create gossip engine instance.
 type Engine struct{}
 
 // New create gossip engine instance.
-func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladder.EngineInstance {
+func New(transport Transport, options ...sladder.EngineOption) sladder.EngineInstance {
 	if transport == nil {
 		panic("transport is nil")
 	}
-	instance := newInstanceDefault()
+	instance := newInstanceDefault(transport)
 	for _, option := range options {
 		switch v := option.(type) {
 		case minRegionPeer:
@@ -101,27 +121,40 @@ func (e Engine) New(transport Transport, options ...sladder.EngineOption) sladde
 			instance.Fanout = fanout
 		case gossipPeriod:
 			instance.GossipPeriod = time.Duration(v)
+		case manualClearSuspections:
+			instance.disableClearSuspections = true
+		case manualFailureDetect:
+			instance.disableFailureDetect = true
+		case manualSync:
+			instance.disableSync = true
 		}
 	}
 	return instance
 }
 
-// EngineStatistics collects gossip engine statistics.
-type EngineStatistics struct {
-	FinishedSync uint64
-	TimeoutSyncs uint64
-	InSync       uint64
+type leavingNode struct {
+	names    []string
+	snapshot *spb.Node
+	tagIdx   int
+}
+
+type reversedExistenceItem struct {
+	exist bool
+	epoch uint64
 }
 
 // EngineInstance is live gossip engine instance.
 type EngineInstance struct {
 	// parameters fields.
-	minRegionPeer  uint
-	swimTagKey     string
-	SuspectTimeout time.Duration
-	GossipPeriod   time.Duration
-	Region         string
-	Fanout         int32
+	disableSync             bool
+	disableFailureDetect    bool
+	disableClearSuspections bool
+	minRegionPeer           uint
+	swimTagKey              string
+	SuspectTimeout          time.Duration
+	GossipPeriod            time.Duration
+	Region                  string
+	Fanout                  int32
 
 	log       sladder.Logger
 	transport Transport
@@ -132,38 +165,63 @@ type EngineInstance struct {
 
 	withRegion map[string]map[*sladder.Node]struct{}
 
+	messageCounter uint64 // message counter
+	counterSeed    uint64 // seed is to randomize message ID. (formula: message ID = seed + counter).
+	quitAfter      uint64
+
+	// txn fields.
+	innerTxnIDs sync.Map // map[uint32]struct{}
+
 	// sync fields.
-	inSync       map[uint64]struct{}
-	leavingNodes map[*sladder.Node]struct{} // leaving nodes.
+	inSync                sync.Map // map[uint64]struct{}
+	leavingNodes          []*leavingNode
+	leaveingNodeNameIndex map[string]int
+	reversedExistence     map[*sladder.Node]*reversedExistenceItem // trace self-existence from other nodes.
+	canQuit               bool
+
+	// events.
+	pingTimeoutEvent    chan *sladder.Node // ping timeout event.
+	pingReqTimeoutEvent chan *sladder.Node // ping-req timeout event.
 
 	// failure detector fields
 	inPing              map[*sladder.Node]*pingContext  // nodes in ping progress
 	roundTrips          map[*sladder.Node]time.Duration // round-trip time trace.
-	pingTimeoutEvent    chan *sladder.Node              // ping timeout event.
-	pingReqTimeoutEvent chan *sladder.Node              // ping-req timeout event.
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
-	suspectionQueue     suspectionQueue                 // heap order by by suspection.notAfter.
+	suspectionQueue     suspectionQueue                 // heap order by suspection.notAfter.
 
-	statistics EngineStatistics
+	Metrics Metrics
 }
 
-func newInstanceDefault() *EngineInstance {
+func newInstanceDefault(transport Transport) *EngineInstance {
 	return &EngineInstance{
 		SuspectTimeout: defaultSuspectTimeout,
 		minRegionPeer:  defaultMinimumRegionPeer,
-		withRegion:     make(map[string]map[*sladder.Node]struct{}),
 		swimTagKey:     defaultSWIMTagKey,
 		log:            sladder.DefaultLogger,
 		GossipPeriod:   defaultGossipPeriod,
 		Fanout:         1,
 
-		inSync: make(map[uint64]struct{}),
+		withRegion: make(map[string]map[*sladder.Node]struct{}),
+
+		leaveingNodeNameIndex: make(map[string]int),
+		reversedExistence:     make(map[*sladder.Node]*reversedExistenceItem),
+		canQuit:               false,
 
 		inPing:              make(map[*sladder.Node]*pingContext),
 		roundTrips:          make(map[*sladder.Node]time.Duration),
+		suspectionNodeIndex: make(map[*sladder.Node]*suspection),
+
 		pingTimeoutEvent:    make(chan *sladder.Node, 20),
 		pingReqTimeoutEvent: make(chan *sladder.Node, 20),
+		transport:           transport,
 	}
+}
+
+// SWIMTagKey returns current SWIM Tag key name.
+func (e *EngineInstance) SWIMTagKey() string { return e.swimTagKey }
+
+func (e *EngineInstance) generateMessageID() uint64 {
+	return atomic.AddUint64(&e.messageCounter, 1) + e.counterSeed
 }
 
 func (e *EngineInstance) getGossipFanout() int32 {
@@ -171,6 +229,9 @@ func (e *EngineInstance) getGossipFanout() int32 {
 	if fanout < 1 {
 		return 1
 	}
+
+	atomic.StoreUint32(&e.Metrics.GossipFanout, uint32(fanout))
+
 	return fanout
 }
 
@@ -192,11 +253,15 @@ func (e *EngineInstance) getMinPingReqTimeoutTimes() uint {
 
 func (e *EngineInstance) tickGossipPeriodGo(proc func(time.Time)) {
 	period := e.getGossipPeriod()
+
+	atomic.StoreUint64(&e.Metrics.GossipPeriod, uint64(period))
+
 	e.arbiter.TickGo(func(cancel func(), deadline time.Time) {
 		proc(deadline)
 		if nextPeriod := e.getGossipPeriod(); nextPeriod != period { // period changed.
 			cancel()
-			e.goClusterSync()
+
+			go e.tickGossipPeriodGo(proc) // re-sched.
 		}
 	}, period, 1)
 }
@@ -209,7 +274,7 @@ func (e *EngineInstance) selectRandomNodes(n int32, excludeSelf bool) []*sladder
 		if int32(len(nodes)) < n {
 			nodes = append(nodes, node)
 		} else if i := rand.Int31n(cnt + 1); i < n {
-			nodes[n] = node
+			nodes[i] = node
 		}
 		cnt++
 		return true
@@ -247,7 +312,83 @@ func (e *EngineInstance) sendProto(names []string, body protoiface.MessageV1) {
 	e.transport.Send(names, raw)
 }
 
-func (e *EngineInstance) dispatchGossipMessage() {
+func (e *EngineInstance) dispatchEvents() {
+	for {
+		select {
+		case <-e.arbiter.Exit():
+			return
+
+		case node := <-e.pingReqTimeoutEvent:
+			e.processPingReqTimeout(node)
+
+		case node := <-e.pingTimeoutEvent:
+			e.processPingTimeout(node)
+		}
+	}
+}
+
+func (e *EngineInstance) _removeLeavingNode(index ...int) {
+	if len(index) < 1 {
+		return
+	}
+	sort.Ints(index)
+
+	depit := func(idx int) {
+		for _, name := range e.leavingNodes[idx].names {
+			delete(e.leaveingNodeNameIndex, name)
+		}
+	}
+
+	pit, flat, lpit := 0, len(e.leavingNodes), len(index)
+	prevPit, prevlastPit := -1, -1
+	for pit < lpit {
+		// search for pit.
+		newIdx := index[pit]
+		if newIdx < 0 || prevPit == newIdx {
+			pit++
+			continue
+		}
+
+		lastPit := index[lpit-1]
+		if lastPit < 0 || lastPit == prevlastPit { // de-dup
+			lpit--
+			continue
+		}
+		prevlastPit = flat - 1
+		if lastPit == flat-1 { // ptr to pit.
+			depit(flat - 1)
+			lpit--
+			flat--
+			continue
+		}
+
+		prevPit = newIdx
+
+		depit(newIdx)
+
+		e.leavingNodes[newIdx] = e.leavingNodes[flat-1]
+		for _, name := range e.leavingNodes[newIdx].names {
+			e.leaveingNodeNameIndex[name] = newIdx
+		}
+
+		pit++
+		flat--
+	}
+	e.leavingNodes = e.leavingNodes[:flat]
+
+}
+
+func (e *EngineInstance) dispatchGossipMessage(from []string, msg *pb.GossipMessage) {
+	switch msg.Type {
+	case pb.GossipMessage_Ack, pb.GossipMessage_Ping, pb.GossipMessage_PingReq:
+		e.processFailureDetectionProto(from, msg)
+
+	case pb.GossipMessage_Sync:
+		e.processSyncGossipProto(from, msg)
+	}
+}
+
+func (e *EngineInstance) pumpGossipMessage() {
 	var msg pb.GossipMessage
 
 	for e.arbiter.ShouldRun() {
@@ -259,41 +400,10 @@ func (e *EngineInstance) dispatchGossipMessage() {
 			e.log.Warn("invalid gossip message received, decoder got " + err.Error())
 			continue
 		}
-		switch msg.Type {
-		case pb.GossipMessage_Ack, pb.GossipMessage_Ping, pb.GossipMessage_PingReq:
-			e.processFailureDetectionProto(from, &msg)
 
-		case pb.GossipMessage_Sync:
-			e.processSyncGossipProto(from, &msg)
-		}
+		e.dispatchGossipMessage(from, &msg)
 	}
 
-}
-
-func (e *EngineInstance) onClusterEvent(ctx *sladder.ClusterEventContext, event sladder.Event, node *sladder.Node) {
-	switch event {
-	case sladder.EmptyNodeJoined:
-		if e.cluster.Self() == node {
-			e.onSelfSWIMTagMissing(node)
-		}
-
-	case sladder.NodeRemoved:
-		e.onNodeRemovedClearFailureDetector(node)
-		e.onNodeRemoved(node)
-	}
-}
-
-func (e *EngineInstance) onNodeRemoved(node *sladder.Node) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-
-	if err := node.Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
-		e.removeFromRegion(tag.Region(), node, -1)
-		return false, nil
-	}).Error; err != nil {
-		e.log.Fatal("cannot start txn when remove node from region map, got " + err.Error())
-		return
-	}
 }
 
 func (e *EngineInstance) insertToRegion(region string, node *sladder.Node) {
@@ -330,35 +440,8 @@ func (e *EngineInstance) updateRegion(old, new string, node *sladder.Node) {
 	e.insertToRegion(new, node)
 }
 
-func (e *EngineInstance) insertRegion(node *sladder.Node, tag *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.insertToRegion(tag.Region, node)
-}
-
-func (e *EngineInstance) updateRegionFromTag(node *sladder.Node, old, new *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.updateRegion(old.Region, new.Region, node)
-}
-
-func (e *EngineInstance) removeRegion(node *sladder.Node, tag *SWIMTag) {
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	e.removeFromRegion(tag.Region, node, -1)
-}
-
 func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta sladder.KeyValueEventMetadata) {
 	switch meta.Event() {
-	case sladder.KeyInsert:
-		meta, tag := meta.(sladder.KeyInsertEventMetadata), &SWIMTag{}
-		if err := tag.Decode(meta.Key()); err != nil {
-			e.log.Fatal("cannot decode inserted swim tag, got " + err.Error())
-			break
-		}
-
-		e.insertRegion(meta.Node(), tag)
-
 	case sladder.ValueChanged:
 		old, new := &SWIMTag{}, &SWIMTag{}
 		meta := meta.(sladder.KeyChangeEventMetadata)
@@ -374,23 +457,8 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 		if meta.Node() == e.cluster.Self() {
 			e.onSelfSWIMStateChanged(meta.Node(), old, new)
 		} else {
-			e.traceSuspections(meta.Node(), new)
-			e.removeIfDead(meta.Node(), new)
-			e.removeIfLeft(meta.Node(), new)
+			e.removeIfDeadOrLeft(meta.Node(), new)
 		}
-		e.updateRegionFromTag(meta.Node(), old, new)
-
-	case sladder.KeyDelete:
-		meta, tag := meta.(sladder.KeyInsertEventMetadata), &SWIMTag{}
-		if err := tag.Decode(meta.Key()); err != nil {
-			e.log.Fatal("cannot decode deleted swim tag, got " + err.Error())
-			break
-		}
-
-		if meta.Node() == e.cluster.Self() {
-			e.onSelfSWIMTagMissing(meta.Node())
-		}
-		e.removeRegion(meta.Node(), tag)
 	}
 }
 
@@ -406,40 +474,78 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 		return nil
 	}
 
+	var seedBuf [8]byte
+	if _, err = crand.Read(seedBuf[:]); err != nil {
+		return err
+	}
+	e.counterSeed = binary.LittleEndian.Uint64(seedBuf[:])
+
+	e.cluster = c
+
 	// register SWIM tag.
 	if err = c.RegisterKey(e.swimTagKey, &SWIMTagValidator{}, true, 0); err != nil {
 		return err
 	}
 
-	// watch event to sync SWIM states.
-	c.Watch(e.onClusterEvent)
-	c.Keys(e.swimTagKey).Watch(e.onSWIMTagUpdated)
-
 	e.arbiter = arbit.New()
-	e.cluster = c
+
+	// watch event to sync SWIM states.
+	c.Keys(e.swimTagKey).Watch(e.onSWIMTagUpdated)
 
 	e.goClusterSync()   // start cluster sync process.
 	e.goDetectFailure() // start failure detection process.
 
+	e.arbiter.Go(func() { e.dispatchEvents() })
+	e.arbiter.Go(func() { e.pumpGossipMessage() })
+
 	return nil
 }
 
+// Inited returns true if engine has already inited.
+func (e *EngineInstance) Inited() bool { return e.arbiter != nil }
+
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
-	e.cluster.Self().Keys(e.swimTagKey).Txn(func(tag *SWIMTagTxn) (bool, error) {
-		tag.Leave()
-		return true, nil
-	})
-
-	waitTerm, lastSucceededTerm := 10, e.statistics.FinishedSync-e.statistics.TimeoutSyncs
-	e.tickGossipPeriodGo(func(deadline time.Time) {
-		if waitTerm > 1 {
-			waitTerm--
-			return
-		} else if newSucceededTerm := e.statistics.FinishedSync - e.statistics.TimeoutSyncs; newSucceededTerm-lastSucceededTerm < 3 {
-			return
+	// change state of self to LEAVE.
+	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		{
+			rtx, err := t.KV(e.cluster.Self(), e.swimTagKey)
+			if err != nil {
+				e.log.Fatal("transaction get key-value failure, got " + err.Error())
+				return false
+			}
+			tag := rtx.(*SWIMTagTxn)
+			tag.Leave()
 		}
-		e.arbiter.Shutdown()
+		return true
+	}); err != nil {
+		e.log.Fatal("leave transaction failure, got " + err.Error())
+		return err
+	}
+
+	e.quitAfter = atomic.AddUint64(&e.messageCounter, 1)
+
+	// TODO(xutao): deal with the situation that more then one nodes are racing to quit.
+	e.tickGossipPeriodGo(func(deadline time.Time) {
+		canShutdown := e.canQuit
+		if !canShutdown {
+			canShutdown = true
+			e.lock.RLock()
+			for _, existenceTrace := range e.reversedExistence {
+				if existenceTrace.epoch < 1 {
+					continue
+				}
+				if existenceTrace.exist {
+					canShutdown = false
+					break
+				}
+			}
+			e.lock.RUnlock()
+		}
+
+		if canShutdown {
+			e.arbiter.Shutdown()
+		}
 	})
 
 	e.arbiter.Join()

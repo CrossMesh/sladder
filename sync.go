@@ -1,10 +1,14 @@
 package sladder
 
 import (
-	"github.com/sunmxt/sladder/proto"
+	"fmt"
+	"sync/atomic"
+
+	"github.com/crossmesh/sladder/proto"
 )
 
-func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) []string {
+// ResolveNodeNameFromProtobuf resolves node names from node snapshot.
+func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) ([]string, error) {
 	watchKeySet := make(map[string]*KeyValue)
 	for _, key := range c.resolver.Keys() {
 		watchKeySet[key] = nil
@@ -33,113 +37,148 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) []
 
 	names, err := c.resolver.Resolve(watchEntries...)
 	if err != nil {
-		c.log.Fatal("failed to resolve node name from protobuf, got " + err.Error())
+		return nil, err
+	}
+
+	return names, nil
+}
+
+// MergeNodeSnapshot updates node entries by refering to protobuf snapshot.
+func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMissingValidator, failSyncFailure bool) (err error) {
+	type diffLog struct {
+		log                     *txnLog
+		value                   string
+		isDelete, originDeleted bool
+	}
+
+	if n == nil || s == nil {
 		return nil
 	}
 
-	return names
-}
-
-// SyncFromProtobufSnapshot sync cluster states by refering to protobuf snapshot.
-func (c *Cluster) SyncFromProtobufSnapshot(s *proto.Cluster, autoNewNode bool, validate func(*Node, []*proto.Node_KeyValue) bool) {
-	if s == nil {
-		return
-	}
-
-	// sync to existings
-	for _, msg := range s.Nodes {
-		names := c.resolveNodeNameFromProtobuf(msg.Kvs)
-		node := c.mostPossibleNode(names)
-		if validate != nil && !validate(node, msg.Kvs) {
-			continue
-		}
-		if node == nil {
-			if !autoNewNode {
-				continue
-			}
-			newNode, err := c.NewNode()
-			if err != nil {
-				c.log.Fatal("failed to create new node to sync, got ", err.Error())
-				continue
-			}
-			node = newNode
-		}
-		node.SyncFromProtobufSnapshot(msg)
-	}
-}
-
-// SyncFromProtobufSnapshot sync node states by refering to protobuf snapshot.
-func (n *Node) SyncFromProtobufSnapshot(s *proto.Node) {
-	if s == nil {
-		return
-	}
-
 	var (
-		validator KVValidator
-		accepted  bool
+		accepted       bool
+		syncLogs       []*diffLog
+		log            *txnLog
+		existingKeySet map[string]struct{}
 	)
-	existingKeySet := make(map[string]struct{}, len(s.Kvs))
 
-	syncEntry := func(entry *KeyValueEntry, msgKV *proto.Node_KeyValue) (accepted bool) {
-		var err error
+	if deletion {
+		existingKeySet = make(map[string]struct{})
+	}
 
+	syncEntry := func(entry *KeyValue, validator KVValidator, msgKV *proto.Node_KeyValue) (accepted bool, err error) {
 		if msgKV == nil {
-			accepted, err = entry.validator.Sync(entry, nil)
+			accepted, err = validator.Sync(entry, nil)
 		} else {
-			accepted, err = entry.validator.Sync(entry, &KeyValue{
+			accepted, err = validator.Sync(entry, &KeyValue{
 				Key:   msgKV.Key,
 				Value: msgKV.Value,
 			})
 		}
 		if err != nil {
-			n.cluster.log.Fatalf("validator failure: %v {key = %v}", err, entry.Key)
-			return false
+			if !failSyncFailure {
+				err = nil
+			}
+			return false, err
 		}
-		return accepted
+		return accepted, nil
 	}
 
-	n.lock.Lock()
-	defer n.lock.Unlock()
+	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
+
+	getLatestLog := func(key string) (log *txnLog, err error) {
+		if log, _, err = t.getLatestLog(n, key, true, lc); err != nil {
+			if err != ErrValidatorMissing || failMissingValidator {
+				return nil, err
+			}
+		}
+		if log.txn == nil {
+			err = fmt.Errorf("Got nil KVTransaction in op log. {key = %v, node = %v}", key, n.PrintableName())
+			t.Cluster.log.Fatal(err.Error())
+			return log, err
+		}
+		return log, nil
+	}
+
+	t.lock.Lock()
+	defer t.lock.Unlock()
 
 	for _, msg := range s.Kvs {
 		key := msg.Key
 
-		entry, exists := n.kvs[key]
-		if !exists { // new key-value
-			if validator, _ = n.cluster.validators[key]; validator == nil {
-				// not accaptable for missing validator.
-				n.cluster.log.Warnf("missing key-value validator for new remote entry {nodeID = %v, key = %v}", n.PrintableName(), key)
-				continue
-			}
-			entry = &KeyValueEntry{
-				validator: validator,
-				KeyValue: KeyValue{
-					Key: key,
-				},
-			}
-			if accepted = syncEntry(entry, msg); accepted {
-				// save accepted entry.
-				n.kvs[key] = entry
-				n.cluster.emitKeyInsertion(n, entry.Key, entry.Value, n.keyValueEntries(true))
-			}
-		} else {
-			// existing one.
-			// sync to storage entry.
-			origin := entry.Value
-			if accepted = syncEntry(entry, msg); accepted {
-				n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value, n.keyValueEntries(true))
-			}
+		if log, err = getLatestLog(key); err != nil {
+			return err
 		}
-		if accepted {
+		if log == nil {
+			continue
+		}
+
+		latestValue := log.txn.After()
+
+		buf := KeyValue{Key: key, Value: latestValue}
+		if accepted, err = syncEntry(&buf, log.validator, msg); err != nil {
+			return err
+		} else if accepted {
+			// save diff.
+			syncLogs = append(syncLogs, &diffLog{log: log, value: buf.Value})
+		}
+
+		if deletion {
 			existingKeySet[key] = struct{}{}
 		}
 	}
 
-	// delete old entry.
-	for key, entry := range n.kvs {
-		if _, exist := existingKeySet[entry.Key]; !exist && syncEntry(entry, nil) {
-			delete(n.kvs, key)
-			n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
+	if deletion {
+		t.rangeNodeKeys(n, func(key string, pastExists bool) bool {
+			if _, exists := existingKeySet[key]; !exists {
+				if log, err = getLatestLog(key); err != nil {
+					return false
+				}
+				syncLogs = append(syncLogs, &diffLog{log: log, isDelete: true})
+			}
+			return true
+		})
+		if err != nil {
+			return err
 		}
 	}
+
+	// TODO(xutao): better to validate values first.
+	// apply sync diffs.
+	lastLog := 0
+	for lastLog < len(syncLogs) {
+		var new string
+
+		diff := syncLogs[lastLog]
+		old := diff.log.txn.After()
+		if !diff.isDelete {
+			new = diff.value
+		} else {
+			new = diff.log.txn.Before()
+			diff.originDeleted = diff.log.deletion
+			diff.log.deletion = true
+		}
+		if err = diff.log.txn.SetRawValue(new); err != nil { // fatal. value invalid.
+			err = fmt.Errorf("merge snapshot fails to apply raw value. (err = \"%v\") {key = \"%v\", node = \"%v\"}", err, diff, n.PrintableName())
+			break
+		}
+		diff.value = old
+
+		lastLog++
+	}
+
+	if err != nil { // rollback log states.
+		for rollIdx := 0; rollIdx < lastLog; rollIdx++ {
+			diff := syncLogs[rollIdx]
+			if diff.isDelete {
+				diff.log.deletion = diff.originDeleted
+			}
+			if ierr := diff.log.txn.SetRawValue(diff.value); ierr != nil {
+				t.errs = append(t.errs, err, ierr, ErrTransactionStateBroken)
+				return t.errs.AsError()
+			}
+		}
+	}
+
+	return nil
 }

@@ -6,18 +6,19 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/sunmxt/sladder/proto"
+	"github.com/crossmesh/sladder/proto"
 )
 
 var (
-	ErrValidatorMissing    = errors.New("missing validator")
-	ErrRejectedByValidator = errors.New("operation rejected by validator")
-	ErrInvalidKeyValue     = errors.New("invalid key value pair")
+	ErrValidatorMissing      = errors.New("missing validator")
+	ErrRejectedByValidator   = errors.New("operation rejected by validator")
+	ErrRejectedByCoordinator = errors.New("operation rejected by coordinator")
+	ErrInvalidKeyValue       = errors.New("invalid key value pair")
 )
 
 // Node represents members of cluster.
 type Node struct {
-	names []string
+	names []string // (sorted)
 
 	lock    sync.RWMutex
 	kvs     map[string]*KeyValueEntry
@@ -31,11 +32,17 @@ func newNode(cluster *Cluster) *Node {
 	}
 }
 
+// Anonymous checks whether node is anonymous.
+func (n *Node) Anonymous() bool { return len(n.names) < 1 }
+
 // Names returns name set.
 func (n *Node) Names() (names []string) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
+	return n.getNames()
+}
 
+func (n *Node) getNames() (names []string) {
 	names = make([]string, len(n.names))
 	copy(names, n.names)
 	return
@@ -73,33 +80,25 @@ func (n *Node) keyValueEntries(clone bool) (entries []*KeyValue) {
 }
 
 // Delete remove KeyValue.
-func (n *Node) Delete(key string) (bool, error) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-
-	return n.delete(key)
-}
-
-func (n *Node) delete(key string) (bool, error) {
-	entry := n.get(key)
-	if entry == nil {
-		return false, nil
-	}
-	accepted, err := entry.validator.Sync(entry, nil)
-	if err != nil {
-		return false, err
-	}
-	if !accepted {
-		return false, ErrRejectedByValidator
+func (n *Node) Delete(key string) (delete bool, err error) {
+	var errs Errors
+	if err = n.cluster.Txn(func(t *Transaction) bool {
+		if err := t.Delete(n, key); err != nil {
+			errs = append(errs, err)
+			return false
+		}
+		return true
+	}); err != nil {
+		errs = append(errs, err)
 	}
 
-	delete(n.kvs, key)
-	n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
-	return true, nil
+	err = errs.AsError()
+	return err == nil, err
 }
 
 // Set sets KeyValue.
-func (n *Node) Set(key, value string) error {
+func (n *Node) _set(key, value string) error {
+	// TODO(xutao): ensure consistency between entries and node names.
 	var entry *KeyValueEntry
 	var validator KVValidator
 
@@ -108,7 +107,7 @@ func (n *Node) Set(key, value string) error {
 	entry, exists := n.kvs[key]
 	for !exists || entry == nil {
 		// lock order should be preserved to avoid deadlock.
-		// that is: acquire cluster lock, then acquire node lock.
+		// that is: acquire cluster lock first, then acquire node lock.
 		n.lock.Unlock()
 		n.cluster.lock.RLock()
 		validator, exists = n.cluster.validators[key]
@@ -156,7 +155,12 @@ func (n *Node) Set(key, value string) error {
 }
 
 func (n *Node) protobufSnapshot(message *proto.Node) {
-	message.Kvs = make([]*proto.Node_KeyValue, 0, len(n.kvs))
+	if message.Kvs != nil {
+		message.Kvs = message.Kvs[:0]
+	} else {
+		message.Kvs = make([]*proto.Node_KeyValue, 0, len(n.kvs))
+	}
+
 	for key, entry := range n.kvs {
 		entry.Key = key
 		if entry.flags&LocalEntry != 0 { // local entry.
@@ -176,6 +180,7 @@ func (n *Node) PrintableName() string {
 	} else if len(names) == 1 {
 		return names[0]
 	} else {
+		sort.Strings(names)
 		return fmt.Sprintf("%v", names)
 	}
 }
@@ -187,28 +192,47 @@ func (n *Node) ProtobufSnapshot(message *proto.Node) {
 	n.protobufSnapshot(message)
 }
 
-func (n *Node) get(key string) (entry *KeyValueEntry) {
+func (n *Node) getEntry(key string) (entry *KeyValueEntry) {
 	entry, _ = n.kvs[key]
 	return
 }
 
-func (n *Node) replaceValidatorForce(key string, validator KVValidator) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
+func (n *Node) get(key string) (entry *KeyValue) {
+	e := n.getEntry(key)
+	if e == nil {
+		return nil
+	}
+	return &e.KeyValue
+}
 
-	entry, exists := n.kvs[key]
-	if !exists {
-		return
+func deferReplaceValidator(t *Transaction, entry *KeyValueEntry, validator KVValidator) {
+	t.DeferOnCommit(func() {
+		entry.validator = validator
+	})
+}
+
+func (n *Node) replaceValidator(t *Transaction, key string, validator KVValidator, forceReplace bool) error {
+	t.lockRelatedNode(n)
+
+	entry := n.getEntry(key)
+	if entry == nil {
+		return nil
 	}
 
-	// ensure that existing value is valid for new validator.
-	if !validator.Validate(entry.KeyValue) {
-		// drop entry in case of incompatiable validator.
-		delete(n.kvs, key)
-		n.cluster.emitKeyDeletion(n, entry.Key, entry.Value, n.keyValueEntries(true))
+	if validator == nil {
+		t.Delete(n, key) // unregister model.
 	} else {
-		entry.validator = validator // replace.
+		if !validator.Validate(entry.KeyValue) { // ensure that existing value is valid for new validator.
+			if !forceReplace {
+				return ErrIncompatibleValidator
+			}
+
+			// drop entry in case of incompatiable validator.
+			t.Delete(n, key)
+		}
+
+		deferReplaceValidator(t, entry, validator) // replace
 	}
 
-	return
+	return nil
 }

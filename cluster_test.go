@@ -2,13 +2,11 @@ package sladder
 
 import (
 	"errors"
-	"fmt"
-	"math/rand"
 	"testing"
 
+	"github.com/crossmesh/sladder/proto"
 	"github.com/stretchr/testify/assert"
 	mock "github.com/stretchr/testify/mock"
-	"github.com/sunmxt/sladder/proto"
 )
 
 type MockNodeNameKVResolver struct {
@@ -48,21 +46,6 @@ func (r *MockNodeNameKVResolver) Resolve(kvs ...*KeyValue) (ids []string, err er
 	return
 }
 
-type TestRandomNameResolver struct {
-	NumOfNames int
-}
-
-func (r TestRandomNameResolver) Resolve(...*KeyValue) (ns []string, err error) {
-	for n := 0; n < r.NumOfNames; n++ {
-		ns = append(ns, fmt.Sprintf("%x", rand.Uint64()))
-	}
-	return ns, nil
-}
-
-func (r TestRandomNameResolver) Keys() []string {
-	return nil
-}
-
 func newTestFakedCluster(r NodeNameResolver, ei EngineInstance, logger Logger) (*Cluster, *Node, error) {
 	if r == nil {
 		mnr := &TestRandomNameResolver{NumOfNames: 1}
@@ -89,7 +72,7 @@ func TestCluster(t *testing.T) {
 	})
 
 	t.Run("cluster_quit", func(t *testing.T) {
-		ei, nr := &MockEngineInstance{}, TestRandomNameResolver{}
+		ei, nr := &MockEngineInstance{}, &TestRandomNameResolver{}
 		ei.On("Close").Return(nil)
 		ei.Mock.On("Init", mock.Anything).Return(error(nil))
 
@@ -121,7 +104,7 @@ func TestCluster(t *testing.T) {
 
 		ei.Mock.On("Init", mock.Anything).Return(error(nil))
 		ei.Mock.On("Close").Return(error(nil))
-		mnr.On("Keys").Return([]string{"id"})
+		mnr.On("Keys").Return([]string(nil))
 		mnr.On("Resolve", mock.Anything).Return(nil, errors.New("resolve error"))
 
 		c, self, err := NewClusterWithNameResolver(ei, mnr, nil)
@@ -135,7 +118,7 @@ func TestCluster(t *testing.T) {
 
 		ei.Mock.On("Init", mock.Anything).Return(error(nil))
 		ei.Mock.On("Close").Return(errors.New("engine close error"))
-		mnr.On("Keys").Return([]string{"id"})
+		mnr.On("Keys").Return([]string(nil))
 		mnr.On("Resolve", mock.Anything).Return(nil, errors.New("resolve error"))
 
 		assert.Panics(t, func() {
@@ -159,17 +142,13 @@ func TestCluster(t *testing.T) {
 		mnr := &MockNodeNameKVResolver{}
 		mnr.UseKeyAsID("id1", "id2", "id3")
 
-		m := &MockKVValidator{}
-		m.On("Validate", mock.Anything).Return(true)
-		m.On("Sync", mock.Anything, (*KeyValue)(nil)).Return(true, nil)
-
 		c, self, err := newTestFakedCluster(mnr, nil, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, self)
 		assert.NotNil(t, c)
-		assert.NoError(t, c.RegisterKey("id1", m, false, 0))
-		assert.NoError(t, c.RegisterKey("id2", m, false, 0))
-		assert.NoError(t, c.RegisterKey("id3", m, false, 0))
+		assert.NoError(t, c.RegisterKey("id1", &StringValidator{}, false, 0))
+		assert.NoError(t, c.RegisterKey("id2", &StringValidator{}, false, 0))
+		assert.NoError(t, c.RegisterKey("id3", &StringValidator{}, false, 0))
 		assert.Equal(t, 0, len(self.Names()))
 
 		var n1 *Node
@@ -178,8 +157,25 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, n1)
 
 		// add ids.
-		self.Set("id1", "ea309")
-		self.Set("id2", "ea307")
+		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+			{
+				rtx, err := tx.KV(self, "id1")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea309")
+			}
+			{
+				rtx, err := tx.KV(self, "id2")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea307")
+			}
+			return true
+		}))
 		c.EventBarrier()
 		assert.Equal(t, 2, len(self.Names()))
 		assert.Contains(t, self.names, "ea309")
@@ -188,9 +184,33 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea307"))
 
 		// id changes.
-		self.Set("id1", "ea388")
-		self.Set("id2", "ea381")
-		self.Set("id3", "ea389")
+		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+			{
+				rtx, err := tx.KV(self, "id1")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea388")
+			}
+			{
+				rtx, err := tx.KV(self, "id2")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea381")
+			}
+			{
+				rtx, err := tx.KV(self, "id3")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea389")
+			}
+			return true
+		}))
 		c.EventBarrier()
 		assert.Equal(t, 3, len(self.Names()))
 		assert.Contains(t, self.names, "ea388")
@@ -201,8 +221,25 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea381"))
 
 		// reject duplated name.
-		n1.Set("id1", "ea389")
-		n1.Set("id2", "ea008")
+		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+			{
+				rtx, err := tx.KV(n1, "id1")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea389")
+			}
+			{
+				rtx, err := tx.KV(n1, "id2")
+				if !assert.NoError(t, err) {
+					return false
+				}
+				id := rtx.(*StringTxn)
+				id.Set("ea008")
+			}
+			return true
+		}))
 		c.EventBarrier()
 		assert.Equal(t, 1, len(n1.Names()))
 		assert.Contains(t, n1.names, "ea008")
@@ -219,10 +256,18 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea388"))
 		assert.NotNil(t, c.GetNode("ea381"))
 
-		self.Delete("id1")
-		self.Delete("id2")
-		n1.Delete("id1")
-		n1.Delete("id2")
+		deleted, err := self.Delete("id1")
+		assert.NoError(t, err)
+		assert.True(t, deleted)
+		deleted, err = self.Delete("id2")
+		assert.NoError(t, err)
+		assert.True(t, deleted)
+		deleted, err = n1.Delete("id1")
+		assert.NoError(t, err)
+		assert.True(t, deleted)
+		deleted, err = n1.Delete("id2")
+		assert.NoError(t, err)
+		assert.True(t, deleted)
 		c.EventBarrier()
 		assert.Equal(t, 0, len(self.Names()))
 		assert.Nil(t, c.GetNode("ea389"))
@@ -232,7 +277,7 @@ func TestCluster(t *testing.T) {
 		assert.False(t, c.ContainNodes(n1))
 	})
 
-	c, self, err := newTestFakedCluster(TestRandomNameResolver{
+	c, self, err := newTestFakedCluster(&TestRandomNameResolver{
 		NumOfNames: 2,
 	}, nil, nil)
 	assert.NoError(t, err)
@@ -240,44 +285,47 @@ func TestCluster(t *testing.T) {
 	assert.NotNil(t, self)
 	model1, model2, model3 := &MockKVValidator{}, &MockKVValidator{}, &MockKVValidator{}
 	model1.On("Validate", mock.Anything).Return(true)
+	model1.On("Txn", mock.Anything).Return(&MockKVTransaction{}, error(nil))
 	model2.On("Validate", mock.Anything).Return(false)
+	model2.On("Txn", mock.Anything).Return(&MockKVTransaction{}, error(nil))
 	model3.On("Validate", mock.Anything).Return(true)
+	model3.On("Txn", mock.Anything).Return(&MockKVTransaction{}, error(nil))
 
 	t.Run("test_register_key", func(t *testing.T) {
 		assert.NoError(t, c.RegisterKey("key1", nil, false, 0)) // dummy
-		assert.Error(t, ErrValidatorMissing, self.Set("key1", "v1"))
+		assert.Error(t, ErrValidatorMissing, self._set("key1", "v1"))
 
 		assert.NoError(t, c.RegisterKey("key1", model1, false, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		assert.Nil(t, self.Set("key1", "v2"))
+		assert.Nil(t, self._set("key1", "v1"))
+		assert.Nil(t, self._set("key1", "v2"))
 
 		// common test.
-		entry := self.get("key1")
+		entry := self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model1, entry.validator)
 
 		assert.NoError(t, c.RegisterKey("key1", model3, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model3, entry.validator)
 
 		assert.Equal(t, ErrIncompatibleValidator, c.RegisterKey("key1", model2, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model3, entry.validator)
 
 		assert.NoError(t, c.RegisterKey("key1", model2, true, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.Nil(t, entry)
 
 		// removal.
 		assert.NoError(t, c.RegisterKey("key1", model1, true, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		entry = self.get("key1")
+		assert.Nil(t, self._set("key1", "v1"))
+		entry = self.getEntry("key1")
 		assert.NotNil(t, entry)
 		assert.Equal(t, model1, entry.validator)
 		assert.NoError(t, c.RegisterKey("key1", nil, false, 0))
-		entry = self.get("key1")
+		entry = self.getEntry("key1")
 		assert.Nil(t, entry)
 	})
 
@@ -305,8 +353,12 @@ func TestCluster(t *testing.T) {
 		}, false, true)
 
 		// removal
-		assert.False(t, c.RemoveNode(nil))
-		assert.True(t, c.RemoveNode(n))
+		removed, err := c.RemoveNode(nil)
+		assert.NoError(t, err)
+		assert.False(t, removed)
+		removed, err = c.RemoveNode(n)
+		assert.NoError(t, err)
+		assert.True(t, removed)
 		for _, name := range n.Names() {
 			assert.Nil(t, c.GetNode(name))
 		}
@@ -320,7 +372,7 @@ func TestCluster(t *testing.T) {
 		}, false, true)
 	})
 
-	t.Run("test_register_key_atomic", func(t *testing.T) {
+	t.Run("test_register_key_atomicity", func(t *testing.T) {
 		n, err := c.NewNode()
 		assert.NoError(t, err)
 		assert.NotNil(t, n)
@@ -332,10 +384,11 @@ func TestCluster(t *testing.T) {
 		model.On("Validate", mock.MatchedBy(func(entry KeyValue) bool {
 			return entry.Value == "v2"
 		})).Return(false)
+		model.On("Txn", mock.Anything).Return(&MockKVTransaction{}, error(nil))
 
 		assert.NoError(t, c.RegisterKey("key1", model1, false, 0))
-		assert.Nil(t, self.Set("key1", "v1"))
-		assert.Nil(t, n.Set("key1", "v2"))
+		assert.Nil(t, self._set("key1", "v1"))
+		assert.Nil(t, n._set("key1", "v2"))
 		entry1, entry2 := self.get("key1"), n.get("key1")
 		assert.NotNil(t, entry1)
 		assert.NotNil(t, entry2)
@@ -366,7 +419,9 @@ func TestCluster(t *testing.T) {
 		entry1, entry2 = self.get("key1"), n.get("key1")
 		assert.Nil(t, entry1)
 		assert.Nil(t, entry2)
-		assert.True(t, c.RemoveNode(n))
+		removed, err := c.RemoveNode(n)
+		assert.NoError(t, err)
+		assert.True(t, removed)
 	})
 
 	t.Run("test_snapshot", func(t *testing.T) {
@@ -415,7 +470,7 @@ func TestCluster(t *testing.T) {
 		}
 		for node, kvs := range nodeToKV {
 			for key, value := range kvs {
-				assert.NoError(t, node.Set(key, value))
+				assert.NoError(t, node._set(key, value))
 			}
 		}
 
@@ -446,8 +501,11 @@ func TestCluster(t *testing.T) {
 		}
 
 		// cleaning.
-		assert.True(t, c.RemoveNode(n1))
-		assert.True(t, c.RemoveNode(n2))
+		removed, err := c.RemoveNode(n1)
+		assert.NoError(t, err)
+		assert.True(t, removed)
+		removed, err = c.RemoveNode(n2)
+		assert.True(t, removed)
 		assert.NoError(t, c.RegisterKey("key1", nil, true, 0))
 		assert.NoError(t, c.RegisterKey("key2", nil, true, 0))
 		assert.NoError(t, c.RegisterKey("key3", nil, true, 0))
@@ -480,8 +538,14 @@ func TestCluster(t *testing.T) {
 		assert.Nil(t, c.MostPossibleNode(nil))
 
 		// cleaning.
-		assert.True(t, c.RemoveNode(n1))
-		assert.True(t, c.RemoveNode(n2))
-		assert.True(t, c.RemoveNode(n3))
+		removed, err := c.RemoveNode(n1)
+		assert.NoError(t, err)
+		assert.True(t, removed)
+		removed, err = c.RemoveNode(n2)
+		assert.NoError(t, err)
+		assert.True(t, removed)
+		removed, err = c.RemoveNode(n3)
+		assert.NoError(t, err)
+		assert.True(t, removed)
 	})
 }

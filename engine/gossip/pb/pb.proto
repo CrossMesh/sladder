@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package pb;
-option go_package = "github.com/sunmxt/sladder/engine/gossip/pb";
+option go_package = "github.com/crossmesh/sladder/engine/gossip/pb";
 
 import "google/protobuf/any.proto";
 import "proto/core.proto";

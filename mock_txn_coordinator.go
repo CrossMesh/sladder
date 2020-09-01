@@ -33,18 +33,18 @@ func (_m *MockTxnCoordinator) TransactionBeginKV(_a0 *Transaction, _a1 *Node, _a
 }
 
 // TransactionCommit provides a mock function with given fields: _a0, _a1
-func (_m *MockTxnCoordinator) TransactionCommit(_a0 *Transaction, _a1 []*KVTransactionRecord) (bool, error) {
+func (_m *MockTxnCoordinator) TransactionCommit(_a0 *Transaction, _a1 []*TransactionOperation) (bool, error) {
 	ret := _m.Called(_a0, _a1)
 
 	var r0 bool
-	if rf, ok := ret.Get(0).(func(*Transaction, []*KVTransactionRecord) bool); ok {
+	if rf, ok := ret.Get(0).(func(*Transaction, []*TransactionOperation) bool); ok {
 		r0 = rf(_a0, _a1)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
 
 	var r1 error
-	if rf, ok := ret.Get(1).(func(*Transaction, []*KVTransactionRecord) error); ok {
+	if rf, ok := ret.Get(1).(func(*Transaction, []*TransactionOperation) error); ok {
 		r1 = rf(_a0, _a1)
 	} else {
 		r1 = ret.Error(1)

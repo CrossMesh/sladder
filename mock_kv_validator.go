@@ -10,18 +10,18 @@ type MockKVValidator struct {
 }
 
 // Sync provides a mock function with given fields: _a0, _a1
-func (_m *MockKVValidator) Sync(_a0 *KeyValueEntry, _a1 *KeyValue) (bool, error) {
+func (_m *MockKVValidator) Sync(_a0 *KeyValue, _a1 *KeyValue) (bool, error) {
 	ret := _m.Called(_a0, _a1)
 
 	var r0 bool
-	if rf, ok := ret.Get(0).(func(*KeyValueEntry, *KeyValue) bool); ok {
+	if rf, ok := ret.Get(0).(func(*KeyValue, *KeyValue) bool); ok {
 		r0 = rf(_a0, _a1)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
 
 	var r1 error
-	if rf, ok := ret.Get(1).(func(*KeyValueEntry, *KeyValue) error); ok {
+	if rf, ok := ret.Get(1).(func(*KeyValue, *KeyValue) error); ok {
 		r1 = rf(_a0, _a1)
 	} else {
 		r1 = ret.Error(1)

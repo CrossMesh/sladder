@@ -347,7 +347,7 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 }
 
 func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, old, new *SWIMTag) {
-	if new.State != ALIVE {
+	if new.State != ALIVE && e.quitAfter == 0 {
 		// clear false postive.
 		if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 			rtx, err := t.KV(self, e.swimTagKey)

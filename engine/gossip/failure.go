@@ -214,6 +214,7 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 		for _, deletion := range regionOp.deletions {
 			e.removeFromRegion(deletion.region, deletion.node, -1)
 			e._clearNodeFromFailureDetector(deletion.node)
+			e._clearNodeFromSyncer(deletion.node)
 		}
 		for _, updation := range regionOp.updations {
 			e.updateRegion(updation.old, updation.new, updation.node)
@@ -313,6 +314,9 @@ func (e *EngineInstance) removeIfDeadOrLeft(node *sladder.Node, tag *SWIMTag) {
 	if tag.State != DEAD && tag.State != LEFT {
 		return
 	}
+	if node == e.cluster.Self() { // never remove self here.
+		return
+	}
 
 	var leaving *leavingNode
 
@@ -359,6 +363,10 @@ func (e *EngineInstance) removeIfDeadOrLeft(node *sladder.Node, tag *SWIMTag) {
 
 // ClearSuspections clears all expired suspection.
 func (e *EngineInstance) ClearSuspections() {
+	if !e.arbiter.ShouldRun() {
+		return
+	}
+
 	e.lock.Lock()
 
 	if e.suspectionQueue.Len() < 1 {
@@ -413,6 +421,10 @@ func (e *EngineInstance) ClearSuspections() {
 
 // DetectFailure does one failure detection process.
 func (e *EngineInstance) DetectFailure() {
+	if !e.arbiter.ShouldRun() {
+		return
+	}
+
 	nodes := e.selectRandomNodes(e.getGossipFanout(), true)
 	if len(nodes) < 1 {
 		return

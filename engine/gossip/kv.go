@@ -22,9 +22,12 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 	metas := make(map[*sladder.Node]*nodeOpMeta)
 	self := t.Cluster.Self()
 
-	// enforce SWIM tag modification rules.
 	for _, op := range ops {
-		if op.Txn == nil { // ignore node operation.
+		if op.Txn == nil {
+			// checks node ops.
+			if op.Node == self && !op.NodeExists && !isEngineTxn {
+				return false, sladder.ErrTransactionCommitViolation // should not remove self.
+			}
 			continue
 		}
 
@@ -34,6 +37,7 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 			metas[op.Node] = meta
 		}
 
+		// enforce SWIM tag modification rules.
 		if op.Key != e.swimTagKey {
 			continue
 		}

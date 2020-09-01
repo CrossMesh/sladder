@@ -138,6 +138,11 @@ type leavingNode struct {
 	tagIdx   int
 }
 
+type reversedExistenceItem struct {
+	exist bool
+	epoch uint64
+}
+
 // EngineInstance is live gossip engine instance.
 type EngineInstance struct {
 	// parameters fields.
@@ -160,15 +165,19 @@ type EngineInstance struct {
 
 	withRegion map[string]map[*sladder.Node]struct{}
 
+	messageCounter uint64 // message counter
+	counterSeed    uint64 // seed is to randomize message ID. (formula: message ID = seed + counter).
+	quitAfter      uint64
+
 	// txn fields.
 	innerTxnIDs sync.Map // map[uint32]struct{}
 
 	// sync fields.
-	messageCounter        uint64
-	counterSeed           uint64
 	inSync                sync.Map // map[uint64]struct{}
 	leavingNodes          []*leavingNode
 	leaveingNodeNameIndex map[string]int
+	reversedExistence     map[*sladder.Node]*reversedExistenceItem // trace self-existence from other nodes.
+	canQuit               bool
 
 	// events.
 	pingTimeoutEvent    chan *sladder.Node // ping timeout event.
@@ -195,6 +204,8 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 		withRegion: make(map[string]map[*sladder.Node]struct{}),
 
 		leaveingNodeNameIndex: make(map[string]int),
+		reversedExistence:     make(map[*sladder.Node]*reversedExistenceItem),
+		canQuit:               false,
 
 		inPing:              make(map[*sladder.Node]*pingContext),
 		roundTrips:          make(map[*sladder.Node]time.Duration),
@@ -305,6 +316,8 @@ func (e *EngineInstance) dispatchEvents() {
 	for {
 		select {
 		case <-e.arbiter.Exit():
+			return
+
 		case node := <-e.pingReqTimeoutEvent:
 			e.processPingReqTimeout(node)
 
@@ -493,14 +506,14 @@ func (e *EngineInstance) Inited() bool { return e.arbiter != nil }
 
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
-	// change state of self node to LEAVE.
+	// change state of self to LEAVE.
 	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 		{
 			rtx, err := t.KV(e.cluster.Self(), e.swimTagKey)
 			if err != nil {
+				e.log.Fatal("transaction get key-value failure, got " + err.Error())
 				return false
 			}
-			e.log.Fatal("transaction get key-value failure, got " + err.Error())
 			tag := rtx.(*SWIMTagTxn)
 			tag.Leave()
 		}
@@ -510,15 +523,29 @@ func (e *EngineInstance) Close() error {
 		return err
 	}
 
-	// wait 5 gossip terms to spread the LEAVE state.
-	// TODO(xutao): we can safely quit after a successful gossip term.
-	beginSyncTerm := e.Metrics.Sync.Success
+	e.quitAfter = atomic.AddUint64(&e.messageCounter, 1)
+
+	// TODO(xutao): deal with the situation that more then one nodes are racing to quit.
 	e.tickGossipPeriodGo(func(deadline time.Time) {
-		newSyncTerm := e.Metrics.Sync.Success
-		if newSyncTerm-beginSyncTerm < 5 {
-			return
+		canShutdown := e.canQuit
+		if !canShutdown {
+			canShutdown = true
+			e.lock.RLock()
+			for _, existenceTrace := range e.reversedExistence {
+				if existenceTrace.epoch < 1 {
+					continue
+				}
+				if existenceTrace.exist {
+					canShutdown = false
+					break
+				}
+			}
+			e.lock.RUnlock()
 		}
-		e.arbiter.Shutdown()
+
+		if canShutdown {
+			e.arbiter.Shutdown()
+		}
 	})
 
 	e.arbiter.Join()

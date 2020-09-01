@@ -22,6 +22,10 @@ func (e *EngineInstance) goClusterSync() {
 	}
 }
 
+func (e *EngineInstance) _clearNodeFromSyncer(node *sladder.Node) {
+	delete(e.reversedExistence, node)
+}
+
 func (e *EngineInstance) newSyncClusterSnapshot(t *sladder.Transaction) (snap *proto.Cluster) {
 	snap = &proto.Cluster{}
 
@@ -54,6 +58,10 @@ func (e *EngineInstance) newSyncClusterSnapshot(t *sladder.Transaction) (snap *p
 
 // ClusterSync performs one cluster sync process.
 func (e *EngineInstance) ClusterSync() {
+	if !e.arbiter.ShouldRun() {
+		return
+	}
+
 	var (
 		nodes [][]string
 		snap  *proto.Cluster
@@ -124,34 +132,109 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		return
 	}
 
-	var (
-		errs sladder.Errors
-		snap *proto.Cluster
-	)
+	isResponse := false
+	rawMessageID := sync.Id - e.counterSeed
+
+	if r, inSync := e.inSync.Load(sync.Id); inSync {
+		to := r.([]string)
+		sort.Strings(from)
+		util.RangeOverStringSortedSet(from, to, nil, nil, func(s *string) bool {
+			isResponse = true
+			return false
+		})
+		atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF) // -1
+	}
+
+	if isResponse {
+		atomic.AddUint64(&e.Metrics.Sync.Success, 1)
+		e.inSync.Delete(sync.Id)
+	} else {
+		atomic.AddUint64(&e.Metrics.Sync.Incoming, 1)
+	}
+
+	asyncSendResp := func(snap *proto.Cluster) {
+		e.arbiter.Go(func() {
+			e.sendProto(from, &pb.Sync{
+				Id:      sync.Id,
+				Cluster: snap,
+			})
+		})
+	}
+
+	var errs sladder.Errors
 	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		type relatedInfo struct {
+			node      *sladder.Node
+			names     []string
+			tagKeyIdx int
+			tagInMsg  *SWIMTag
+		}
+		var err error
+
+		fromNode, selfSeen := t.MostPossibleNode(from), false
+
 		// mark txn internal.
 		e.innerTxnIDs.Store(t.ID(), struct{}{})
 
-		snap = e.newSyncClusterSnapshot(t) // read a snapshot first.
+		self := e.cluster.Self()
 
-		// start apply snapshot to cluster.
-		var newNode *sladder.Node
-		for _, mnode := range sync.Cluster.Nodes {
-			node, names, err := t.MostPossibleNodeFromProtobuf(mnode.Kvs) // find related node.
-			if err != nil {
+		fastResponse := true
+
+		infos := make([]relatedInfo, len(sync.Cluster.Nodes))
+		for idx, mnode := range sync.Cluster.Nodes { // build relation info.
+
+			info := &infos[idx]
+			info.tagKeyIdx = -1
+
+			if infos[idx].node, info.names, err = t.MostPossibleNodeFromProtobuf(mnode.Kvs); err != nil {
 				errs = append(errs, err, fmt.Errorf("node lookup failure"))
 				return false
 			}
-			if len(names) < 1 { // skip in case of a remote anonymous node.
+			if len(info.names) < 1 { // skip in case of a remote anonymous node.
 				continue
 			}
 
-			tagKeyIndex := -1
+			// search for SWIM tag.
 			for idx, kv := range mnode.Kvs {
 				if kv.Key == e.swimTagKey {
-					tagKeyIndex = idx
+					info.tagKeyIdx = idx
 					break
 				}
+			}
+			// pre-decode
+			if info.tagKeyIdx >= 0 {
+				info.tagInMsg = &SWIMTag{}
+				if err := info.tagInMsg.Decode(mnode.Kvs[info.tagKeyIdx].Value); err != nil {
+					e.log.Warnf("drop a node with invalid swim tag in sync message. (decode err = \"%v\").", err.Error())
+					return false
+				}
+			}
+			if !isResponse {
+				// can send response immediately?
+				if fastResponse && info.node != nil && info.tagInMsg != nil && info.tagInMsg.State == LEFT {
+					fastResponse = false
+				}
+			}
+		}
+
+		if !isResponse {
+			// send response.
+			snap := e.newSyncClusterSnapshot(t)
+			if fastResponse {
+				asyncSendResp(snap)
+			} else {
+				t.DeferOnCommit(func() { asyncSendResp(snap) })
+			}
+		}
+
+		// start apply snapshot to cluster.
+		var newNode *sladder.Node
+		for idx, mnode := range sync.Cluster.Nodes {
+			info := infos[idx]
+			tagKeyIndex, node, names := info.tagKeyIdx, info.node, info.names
+
+			if len(names) < 1 {
+				continue
 			}
 
 			if node == nil { // no related node found in cluster.
@@ -161,11 +244,8 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					continue
 				}
 
-				tag := &SWIMTag{}
-				if err := tag.Decode(mnode.Kvs[tagKeyIndex].Value); err != nil {
-					e.log.Warnf("drop a node with invalid swim tag in sync message. (decode err = \"%v\").", err.Error())
-					return false
-				}
+				tag := info.tagInMsg
+
 				if tag.State == DEAD || tag.State == LEFT {
 					// this node seem to be removed from cluster. we won't accept the old states. skip.
 					continue
@@ -244,13 +324,20 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 				}
 				node = newNode
 
-			} else if tagKeyIndex < 0 && t.KeyExists(node, e.swimTagKey) {
-				continue
+			} else {
+				if tagKeyIndex < 0 && t.KeyExists(node, e.swimTagKey) {
+					continue
+				}
+
+				if isResponse && node == self {
+					selfSeen = true // the remote knows myself.
+				}
 			}
 
 			useNewNode := false
+
+			// stage: may apply swim tag first. (if any)
 			if tagKeyIndex > 0 {
-				// apply swim tag first.
 				tempNode := proto.Node{
 					Kvs: []*proto.Node_KeyValue{mnode.Kvs[tagKeyIndex]},
 				}
@@ -264,6 +351,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 				mnode.Kvs = mnode.Kvs[:len(mnode.Kvs)-1]
 			}
 
+			// stage: may drop invalid entries in snapshot according existing SWIM tag (if any).
 			if t.KeyExists(node, e.swimTagKey) {
 				rtx, err := t.KV(node, e.swimTagKey)
 				if err != nil {
@@ -275,7 +363,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 				}
 				tag := rtx.(*SWIMTagTxn)
 
-				// refine message.
+				// drop invalid entries; refine message.
 				entryList := tag.EntryList(false)
 				sort.Slice(mnode.Kvs, func(i, j int) bool { return mnode.Kvs[i].Key < mnode.Kvs[j].Key })
 				eliIdx, idx, eIdx := 0, 0, 0
@@ -309,6 +397,31 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			}
 		}
 
+		// stage: trace self existence seen by others.
+		if fromNode != nil {
+			e.lock.Lock()
+
+			trace, _ := e.reversedExistence[fromNode]
+			if trace == nil {
+				trace = &reversedExistenceItem{}
+				e.reversedExistence[fromNode] = trace
+			}
+			if rawMessageID > trace.epoch {
+				trace.epoch, trace.exist = rawMessageID, selfSeen
+			}
+			e.lock.Unlock()
+		}
+
+		if isResponse &&
+			e.quitAfter > 0 && selfSeen { // quiting. determine whether quit condition is reached.
+			// ensure LEAVE state included in this synchronizaion.
+			if rawMessageID >= e.quitAfter {
+				// LEAVE state has spreaded.
+				e.canQuit = true
+			}
+		}
+
+		// end snapshot applying.
 		if newNode != nil { // extra unused empty node.
 			if _, err := t.RemoveNode(newNode); err != nil {
 				errs = append(errs, err)
@@ -324,29 +437,4 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 	if err := errs.AsError(); err != nil {
 		e.log.Warnf("a sync failure raised. %v", err.Error())
 	}
-
-	isResponse := false
-	if r, inSync := e.inSync.Load(sync.Id); inSync {
-		to := r.([]string)
-		sort.Strings(from)
-		util.RangeOverStringSortedSet(from, to, nil, nil, func(s *string) bool {
-			isResponse = true
-			return false
-		})
-		atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF) // -1
-	}
-
-	if isResponse {
-		atomic.AddUint64(&e.Metrics.Sync.Success, 1)
-		e.inSync.Delete(sync.Id)
-
-	} else {
-		atomic.AddUint64(&e.Metrics.Sync.Incoming, 1)
-
-		e.sendProto(from, &pb.Sync{
-			Id:      sync.Id,
-			Cluster: snap,
-		})
-	}
-
 }

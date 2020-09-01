@@ -443,6 +443,20 @@ func (c *TestTransportControl) getMockTransport(create bool, names ...string) (m
 	return mt
 }
 
+func (c *TestTransportControl) RemoveTransportTarget(names ...string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	t := c.getMockTransport(false, names...)
+	if t == nil {
+		return
+	}
+	for _, name := range names {
+		delete(c.transports, name)
+	}
+	go t.FlushQueue()
+}
+
 func (c *TestTransportControl) Transport(source []string, names ...string) (t Transport) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -550,6 +564,18 @@ func (t *MockTransport) Send(from []string, names []string, buf []byte) {
 	}
 }
 
+func (t *MockTransport) dequeueMessage() (from []string, buf []byte, gid uint32) {
+	if t.mqh != nil {
+		from, buf, gid = t.mqh.from, t.mqh.msg, t.mqh.gid
+		// dequeue.
+		t.mqh = t.mqh.next
+		if t.mqh == nil {
+			t.mqt = nil
+		}
+	}
+	return
+}
+
 func (t *MockTransport) Receive(ctx context.Context) (from []string, buf []byte) {
 	var gid uint32
 
@@ -558,16 +584,9 @@ func (t *MockTransport) Receive(ctx context.Context) (from []string, buf []byte)
 	var wc chan struct{}
 
 	for {
-		if t.mqh != nil {
-			from, buf, gid = t.mqh.from, t.mqh.msg, t.mqh.gid
-			// dequeue.
-			t.mqh = t.mqh.next
-			if t.mqh == nil {
-				t.mqt = nil
-			}
+		if from, buf, gid = t.dequeueMessage(); buf != nil {
 			break
 		}
-
 		if wc == nil {
 			wc = make(chan struct{}, 1)
 		}
@@ -587,6 +606,19 @@ func (t *MockTransport) Receive(ctx context.Context) (from []string, buf []byte)
 	t.c.ReleaseMessage(gid)
 
 	return
+}
+
+func (t *MockTransport) FlushQueue() {
+	for {
+		t.lock.Lock()
+		_, buf, gid := t.dequeueMessage()
+		if buf == nil {
+			break
+		}
+		t.lock.Unlock()
+
+		t.c.ReleaseMessage(gid)
+	}
 }
 
 func newClusterGod(namePrefix string, numOfName, numOfNode int,

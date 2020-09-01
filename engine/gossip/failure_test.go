@@ -35,9 +35,104 @@ func checkInitialSWIMStates(t *testing.T, god *testClusterGod) {
 }
 
 func TestFailureDetector(t *testing.T) {
-	period := time.Millisecond * 30
+	period := time.Millisecond * 50
+
+	t.Run("quit", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("trivial", func(t *testing.T) {
+			t.Parallel()
+
+			god, ctl, err := newClusterGod("tst", 2, 4, nil, nil)
+			assert.NotNil(t, god)
+			assert.NotNil(t, ctl)
+			assert.NoError(t, err)
+
+			god.RangeVP(func(vp *testClusterViewPoint) bool {
+				assert.NotNil(t, vp)
+				assert.NoError(t, vp.cv.Quit())
+				return true
+			})
+		})
+
+		t.Run("normal", func(t *testing.T) {
+			t.Parallel()
+			requiredQuorum := uint(8)
+
+			god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 8, []sladder.EngineOption{
+				WithGossipPeriod(period),
+				WithMinRegionPeer(requiredQuorum),
+			}, nil)
+
+			assert.NotNil(t, god)
+			assert.NotNil(t, ctl)
+			assert.NoError(t, err)
+			checkInitialSWIMStates(t, god)
+
+			vps := god.VPList()
+			quitVP, quited := vps[0], false
+			quitNodeNames := quitVP.cv.Self().Names()
+			t.Log("quit node =", quitNodeNames)
+
+			go func() {
+				quitVP.cv.Quit()
+				ctl.RemoveTransportTarget(quitNodeNames...)
+				quited = true
+			}()
+
+			for _, vp := range vps[1:] {
+				// validate state change.
+				vp.cv.Keys(vp.engine.swimTagKey).
+					Watch(func(ctx *sladder.WatchEventContext, meta sladder.KeyValueEventMetadata) {
+						if sladder.ValueChanged == meta.Event() {
+							tag := &SWIMTag{}
+							meta := meta.(sladder.KeyChangeEventMetadata)
+							if !assert.NoError(t, tag.Decode(meta.New())) {
+								return
+							}
+							// should not go to DEAD.
+							assert.NotEqual(t, DEAD, tag.State)
+						}
+					})
+			}
+
+			consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+				time.Sleep(period)
+				unconsist = !ViewpointConsist(vps[1:], true, true)
+				if unconsist {
+					return
+				}
+				unconsist = false
+				for _, vp := range vps[1:] {
+					vp.cv.Txn(func(t *sladder.Transaction) bool {
+						node := t.MostPossibleNode(quitNodeNames)
+						if node != nil {
+							unconsist = true
+						}
+						return false
+					})
+					if unconsist {
+						break
+					}
+				}
+				return
+			}, true, true, false, func(e *EngineInstance) {
+				e.ClusterSync()
+				e.DetectFailure()
+				e.ClearSuspections()
+			})
+			assert.True(t, quited)
+			if !assert.Less(t, consistAt, 200, "cluster state doesn't reach the required within 200 round.") {
+				dumpViewPoint(t, vps, true, true)
+			} else {
+				t.Log("one of other viewpoints:")
+				dumpSingleViewPoint(t, vps[1], true, true)
+			}
+		})
+	})
 
 	t.Run("one_node_failure", func(t *testing.T) {
+		t.Parallel()
 		god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 8, []sladder.EngineOption{
 			WithGossipPeriod(period),
 		}, nil)
@@ -80,6 +175,7 @@ func TestFailureDetector(t *testing.T) {
 	})
 
 	t.Run("preseve_region_quorum", func(t *testing.T) {
+		t.Parallel()
 		requiredQuorum := uint(3)
 
 		god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 8, []sladder.EngineOption{
@@ -141,6 +237,7 @@ func TestFailureDetector(t *testing.T) {
 	})
 
 	t.Run("partition_recover", func(t *testing.T) {
+		t.Parallel()
 		requiredQuorum := uint(3)
 		groupQuorum := uint(2)
 
@@ -286,6 +383,7 @@ func TestFailureDetector(t *testing.T) {
 			ctl.RemovePartition(np)
 
 			consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+				time.Sleep(period)
 				unconsist = !ViewpointConsist(vps, true, true)
 				if unconsist {
 					return
@@ -331,4 +429,5 @@ func TestFailureDetector(t *testing.T) {
 			}
 		}
 	})
+
 }

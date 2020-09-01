@@ -526,7 +526,7 @@ func (c *Cluster) RemoveNode(node *Node) (removed bool, err error) {
 	return removed && err == nil, err
 }
 
-// Quit sends "leave" message to cluster and shops member sync.
+// Quit leaves cluster.
 func (c *Cluster) Quit() error {
 	return c.engine.Close()
 }

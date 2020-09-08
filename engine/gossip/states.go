@@ -293,7 +293,6 @@ func (t *SWIMTagTxn) SetRegion(region string) string {
 func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction, isEngineTxn bool, rcs []*sladder.TransactionOperation) (accepted bool, err error) {
 
 	addList, removeList := []string{}, []string{}
-	nodeOps := []*sladder.TransactionOperation{}
 
 	self := e.cluster.Self()
 	// ensure that SWIM tag exists.
@@ -304,7 +303,7 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 			return false, err
 		}
 		tag := rtx.(*SWIMTagTxn)
-		tag.SetRegion(e.Region)
+		tag.SetRegion(e.region)
 		tag.ClaimAlive()
 		tag.BumpVersion()
 	}
@@ -312,7 +311,6 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 	for idx := 0; idx < len(rcs); idx++ {
 		rc := rcs[idx]
 		if rc.Txn == nil { // node operation
-			nodeOps = append(nodeOps, rc)
 			continue
 		}
 

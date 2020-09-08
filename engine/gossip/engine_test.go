@@ -713,7 +713,7 @@ func TestGossipEngine(t *testing.T) {
 
 		re = New(tp, WithRegion("rg1"))
 		assert.NotNil(t, re)
-		assert.Equal(t, "rg1", re.(*EngineInstance).Region)
+		assert.Equal(t, "rg1", re.(*EngineInstance).region)
 		randomTimeout := time.Duration(rand.Int63n(10000000))
 
 		re = New(tp, WithSuspectTimeout(randomTimeout))

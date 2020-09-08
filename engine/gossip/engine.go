@@ -104,7 +104,7 @@ func New(transport Transport, options ...sladder.EngineOption) sladder.EngineIns
 		case minRegionPeer:
 			instance.minRegionPeer = uint(v)
 		case region:
-			instance.Region = string(v)
+			instance.region = string(v)
 		case suspectTimeout:
 			instance.SuspectTimeout = time.Duration(v)
 		case swimTagKey:
@@ -153,7 +153,7 @@ type EngineInstance struct {
 	swimTagKey              string
 	SuspectTimeout          time.Duration
 	GossipPeriod            time.Duration
-	Region                  string
+	region                  string
 	Fanout                  int32
 
 	log       sladder.Logger
@@ -219,6 +219,33 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 
 // SWIMTagKey returns current SWIM Tag key name.
 func (e *EngineInstance) SWIMTagKey() string { return e.swimTagKey }
+
+// Region returns region name to which self belongs.
+func (e *EngineInstance) Region() string { return e.region }
+
+// SetRegion sets region to which self belongs.
+func (e *EngineInstance) SetRegion(new string) (old string, err error) {
+	var errs sladder.Errors
+
+	errs.Trace(e.cluster.Txn(func(t *sladder.Transaction) bool {
+		rtx, err := t.KV(e.cluster.Self(), e.swimTagKey)
+		if err != nil {
+			errs = append(errs, err)
+			return false
+		}
+		tag := rtx.(*SWIMTagTxn)
+		if old := tag.Region(); old == new {
+			return false
+		}
+		tag.SetRegion(new)
+		return true
+	}))
+
+	if err = errs.AsError(); err != nil {
+		old = ""
+	}
+	return
+}
 
 func (e *EngineInstance) generateMessageID() uint64 {
 	return atomic.AddUint64(&e.messageCounter, 1) + e.counterSeed

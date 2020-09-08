@@ -129,6 +129,7 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 		insertions, deletions []*oneRegionParam
 		updations             []*regionUpdation
 	}
+	selfRegionUpdated, newRegion := false, ""
 	var stateUpdates []*stateUpdation
 
 	stateMetricsInc := &StateMetrics{}
@@ -179,6 +180,9 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 				regionOp.updations = append(regionOp.updations, &regionUpdation{
 					node: node, old: old, new: new,
 				})
+				if self := e.cluster.Self(); node == self {
+					selfRegionUpdated, newRegion = true, new
+				}
 			}
 			if new, old := tag.State(), oldTag.State; new != old {
 				stateUpdates = append(stateUpdates, &stateUpdation{
@@ -196,18 +200,21 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 	}
 
 	t.DeferOnCommit(func() {
+		e.Metrics.State.AtomicAdd(stateMetricsInc)
+
 		if len(regionOp.insertions)+
 			len(regionOp.deletions)+
 			len(regionOp.updations)+
-			len(stateUpdates) <= 0 {
+			len(stateUpdates) <= 0 && !selfRegionUpdated {
 			return
 		}
-
-		e.Metrics.State.AtomicAdd(stateMetricsInc)
 
 		e.lock.Lock()
 		defer e.lock.Unlock()
 
+		if selfRegionUpdated {
+			e.region = newRegion
+		}
 		for _, insertion := range regionOp.insertions {
 			e.insertToRegion(insertion.region, insertion.node)
 		}

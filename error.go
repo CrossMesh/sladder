@@ -16,6 +16,14 @@ func (e Errors) Error() (s string) {
 	return
 }
 
+// Trace appends an err to Errors.
+func (e *Errors) Trace(err error) {
+	if err == nil {
+		return
+	}
+	*e = append(*e, err)
+}
+
 // AsError presents itself as a normal error.
 func (e Errors) AsError() error {
 	switch {

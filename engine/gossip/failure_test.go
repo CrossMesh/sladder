@@ -430,4 +430,38 @@ func TestFailureDetector(t *testing.T) {
 		}
 	})
 
+	t.Run("region_changes", func(t *testing.T) {
+		t.Parallel()
+		god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 8, []sladder.EngineOption{
+			WithGossipPeriod(period),
+		}, nil)
+		assert.NotNil(t, god)
+		assert.NotNil(t, ctl)
+		assert.NoError(t, err)
+		vps := god.VPList()
+		checkInitialSWIMStates(t, god)
+
+		// node to change region.
+		changeVP := vps[0]
+		old, err := changeVP.engine.SetRegion("tst-region-changed")
+		assert.NoError(t, err)
+		assert.Equal(t, "", old)
+		assert.Equal(t, "tst-region-changed", changeVP.engine.Region())
+		consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+			return !ViewpointConsist(vps, true, true)
+		}, true, true, false, func(e *EngineInstance) {
+			e.ClusterSync()
+			e.DetectFailure()
+			e.ClearSuspections()
+		})
+
+		if !assert.Less(t, consistAt, 200, "cluster doesn't be consist within 200 round.") {
+			time.Sleep(period)
+			dumpViewPoint(t, vps, true, true)
+		} else {
+			t.Log("group state is consist at round", consistAt)
+			t.Log("one of viewpoint: ")
+			dumpSingleViewPoint(t, vps[0], true, true)
+		}
+	})
 }

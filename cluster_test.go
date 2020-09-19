@@ -220,7 +220,7 @@ func TestCluster(t *testing.T) {
 		assert.NotNil(t, c.GetNode("ea388"))
 		assert.NotNil(t, c.GetNode("ea381"))
 
-		// reject duplated name.
+		// duplicated name.
 		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
 			{
 				rtx, err := tx.KV(n1, "id1")
@@ -241,9 +241,9 @@ func TestCluster(t *testing.T) {
 			return true
 		}))
 		c.EventBarrier()
-		assert.Equal(t, 1, len(n1.Names()))
+		assert.Equal(t, 2, len(n1.Names()))
 		assert.Contains(t, n1.names, "ea008")
-		assert.Equal(t, self, c.GetNode("ea389"))
+		assert.Equal(t, self, c.GetNode("ea381"))
 		assert.Equal(t, n1, c.GetNode("ea008"))
 
 		// id delete.
@@ -252,7 +252,7 @@ func TestCluster(t *testing.T) {
 		assert.Equal(t, 2, len(self.Names()))
 		assert.Contains(t, self.names, "ea388")
 		assert.Contains(t, self.names, "ea381")
-		assert.Nil(t, c.GetNode("ea389"))
+		assert.Equal(t, n1, c.GetNode("ea389"))
 		assert.NotNil(t, c.GetNode("ea388"))
 		assert.NotNil(t, c.GetNode("ea381"))
 
@@ -275,6 +275,340 @@ func TestCluster(t *testing.T) {
 		assert.Nil(t, c.GetNode("ea381"))
 		assert.True(t, c.ContainNodes(self))
 		assert.False(t, c.ContainNodes(n1))
+	})
+
+	t.Run("test_name_conflict_merging", func(t *testing.T) {
+		t.Run("normal", func(t *testing.T) {
+			mnr := &MockNodeNameKVResolver{}
+			mnr.UseKeyAsID("id1", "id2", "id3")
+
+			c, self, err := newTestFakedCluster(mnr, nil, nil)
+			assert.NoError(t, err)
+			assert.NotNil(t, self)
+			assert.NotNil(t, c)
+			assert.NoError(t, c.RegisterKey("id1", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id2", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id3", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("data1", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("data2", &StringValidator{}, false, 0))
+			assert.Equal(t, 0, len(self.Names()))
+
+			var n1, n2, n3 *Node
+			n1, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n1)
+			n2, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n2)
+			n3, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n3)
+
+			assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+				{
+					rtx, err := tx.KV(n2, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(n2, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+				{
+					rtx, err := tx.KV(n2, "data1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("d1")
+				}
+				{
+					rtx, err := tx.KV(n2, "data2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("d2")
+				}
+
+				{
+					rtx, err := tx.KV(n1, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+				{
+					rtx, err := tx.KV(n1, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("4")
+				}
+				return true
+			}))
+			c.EventBarrier()
+			assert.True(t, c.ContainNodes(n2, n3, self, n1))
+
+			assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+				{
+					rtx, err := tx.KV(self, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(self, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(self, "id3")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+				return true
+			}))
+			c.EventBarrier()
+			assert.True(t, c.ContainNodes(n3, self, n1))
+			assert.False(t, c.ContainNodes(n2))
+			entry := self.getEntry("data1")
+			assert.NotNil(t, entry)
+			assert.Equal(t, entry.Key, "data1")
+			assert.Equal(t, entry.Value, "d1")
+			entry = self.getEntry("data2")
+			assert.NotNil(t, entry)
+			assert.Equal(t, entry.Key, "data2")
+			assert.Equal(t, entry.Value, "d2")
+			t.Log("nodes: ", c.nodes)
+			t.Log("conflict nodes: ", c.conflictNodes)
+		})
+
+		t.Run("reject_self_source", func(t *testing.T) {
+			mnr := &MockNodeNameKVResolver{}
+			mnr.UseKeyAsID("id1", "id2", "id3")
+
+			c, self, err := newTestFakedCluster(mnr, nil, nil)
+			assert.NoError(t, err)
+			assert.NotNil(t, self)
+			assert.NotNil(t, c)
+			assert.NoError(t, c.RegisterKey("id1", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id2", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id3", &StringValidator{}, false, 0))
+			assert.Equal(t, 0, len(self.Names()))
+
+			var n1 *Node
+			n1, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n1)
+			// n1 <-- self
+			// expect to reject a merge.
+			assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+				{
+					rtx, err := tx.KV(self, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(self, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(n1, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(n1, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(n1, "id3")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+				return true
+			}))
+			c.EventBarrier()
+			assert.True(t, c.ContainNodes(self))
+			assert.True(t, c.ContainNodes(n1))
+			t.Log([]*Node{n1})
+			t.Log("nodes: ", c.nodes)
+			t.Log("conflict nodes: ", c.conflictNodes)
+		})
+
+		t.Run("loop_merge", func(t *testing.T) {
+			mnr := &MockNodeNameKVResolver{}
+			mnr.UseKeyAsID("id1", "id2", "id3")
+
+			c, self, err := newTestFakedCluster(mnr, nil, nil)
+			assert.NoError(t, err)
+			assert.NotNil(t, self)
+			assert.NotNil(t, c)
+			assert.NoError(t, c.RegisterKey("id1", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id2", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("id3", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("data1", &StringValidator{}, false, 0))
+			assert.NoError(t, c.RegisterKey("data2", &StringValidator{}, false, 0))
+			assert.Equal(t, 0, len(self.Names()))
+
+			var n1, n2, n3 *Node
+			n1, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n1)
+			n2, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n2)
+			n3, err = c.NewNode()
+			assert.NoError(t, err)
+			assert.NotNil(t, n3)
+
+			// n1 <-- self <-- n2 <-- n3, and self <-- n1.
+			// expect merge: self <-- n1, n2, n3
+			assert.NoError(t, c.Txn(func(tx *Transaction) bool {
+				{
+					rtx, err := tx.KV(self, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(self, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(self, "id3")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+				{
+					rtx, err := tx.KV(n1, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(n1, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				{
+					rtx, err := tx.KV(n1, "id3")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("3")
+				}
+
+				{
+					rtx, err := tx.KV(n2, "data1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("d1")
+				}
+				{
+					rtx, err := tx.KV(n2, "data2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("d2")
+				}
+				{
+					rtx, err := tx.KV(n2, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("1")
+				}
+				{
+					rtx, err := tx.KV(n2, "id2")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+
+				{
+					rtx, err := tx.KV(n3, "id1")
+					if !assert.NoError(t, err) {
+						return false
+					}
+					id := rtx.(*StringTxn)
+					id.Set("2")
+				}
+				return true
+			}))
+			c.EventBarrier()
+			assert.True(t, c.ContainNodes(self))
+			assert.False(t, c.ContainNodes(n1))
+			assert.False(t, c.ContainNodes(n2))
+			assert.False(t, c.ContainNodes(n3))
+			entry := self.getEntry("data1")
+			assert.NotNil(t, entry)
+			assert.Equal(t, entry.Key, "data1")
+			assert.Equal(t, entry.Value, "d1")
+			entry = self.getEntry("data2")
+			assert.NotNil(t, entry)
+			assert.Equal(t, entry.Key, "data2")
+			assert.Equal(t, entry.Value, "d2")
+			t.Log([]*Node{n1, n2, n3})
+			t.Log("nodes: ", c.nodes)
+			t.Log("conflict nodes: ", c.conflictNodes)
+		})
 	})
 
 	c, self, err := newTestFakedCluster(&TestRandomNameResolver{

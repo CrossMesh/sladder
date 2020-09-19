@@ -33,8 +33,12 @@ type TransactionOperation struct {
 	PastExists, Exists, Updated bool
 }
 
-func getExistance(new, txnUpdated, deleted bool) (pastExists, exists, updated bool) {
+func getExistence(new, txnUpdated, deleted bool) (pastExists, exists, updated bool) {
 	return !new, !(new || deleted) || txnUpdated, txnUpdated
+}
+
+func getNodeExistence(nodeOp *nodeOpLog) (pastExists, exists bool) {
+	return nodeOp == nil || nodeOp.deleted, nodeOp == nil || !nodeOp.deleted
 }
 
 // TxnStartCoordinator traces start of transaction
@@ -217,8 +221,7 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 		return rollback()
 	}
 
-	err = t.deferNameChanges()
-	if err != nil {
+	if err = t.doNodeNaming(); err != nil {
 		t.errs = append(t.errs, err)
 		return rollback()
 	}
@@ -235,8 +238,8 @@ func (c *Cluster) Txn(do func(*Transaction) bool, opts ...TxnOption) (err error)
 			}
 			updated := log.txn.Updated()
 			nodeOp, _ := t.nodeOps[ref.node]
-			rc.PastExists, rc.Exists, rc.Updated = getExistance(log.new, updated, log.deletion)
-			rc.NodePastExists, rc.NodeExists = nodeOp == nil || nodeOp.deleted, nodeOp == nil || !nodeOp.deleted
+			rc.PastExists, rc.Exists, rc.Updated = getExistence(log.new, updated, log.deletion)
+			rc.NodePastExists, rc.NodeExists = getNodeExistence(nodeOp)
 			txns = append(txns, rc)
 		}
 		for node, log := range t.nodeOps {
@@ -377,33 +380,44 @@ func (t *Transaction) DeferOnCommit(fn func()) { appendDeferOps(&t.deferOps.onCo
 // DeferOnRollback registers a function called before transaction rollbacks.
 func (t *Transaction) DeferOnRollback(fn func()) { appendDeferOps(&t.deferOps.onRollback, fn, &t.lc) }
 
-func (t *Transaction) deferNameChanges() (err error) {
+func (t *Transaction) doNodeNaming() (err error) {
 	nameKeys := t.Cluster.resolver.Keys()
+	numOfKeys := len(nameKeys)
+	if numOfKeys < 0 {
+		return errors.New("len() < 0") // should not happen.
+	}
+	if numOfKeys > 1 {
+		sort.Strings(nameKeys)
+	}
 
 	updates := make(map[*Node]struct{})
 
-	if len(nameKeys) > 0 {
+	if numOfKeys > 0 {
 		sort.Strings(nameKeys)
 		for ref := range t.logs {
 			if sort.SearchStrings(nameKeys, ref.key) >= 0 {
 				updates[ref.node] = struct{}{}
 			}
 		}
-	} else {
-		// If resolver requires no entry, names of node should be resolved when a node newly joins cluster.
-		for node, op := range t.nodeOps {
-			if !op.deleted { // created
-				updates[node] = struct{}{}
-			}
-		}
+	}
+	for node := range t.nodeOps {
+		updates[node] = struct{}{}
 	}
 
-	if len(updates) > 0 {
-		t.Cluster.nodeIndexLock.Lock()
-		defer t.Defer(t.Cluster.nodeIndexLock.Unlock)
+	if len(updates) < 1 {
+		return nil
+	}
 
-		for node := range updates {
-			var kvs []*KeyValue = nil
+	t.Cluster.nodeIndexLock.Lock()
+	defer t.Defer(t.Cluster.nodeIndexLock.Unlock)
+
+	for node := range updates {
+		var kvs []*KeyValue = nil
+		var names []string = nil
+
+		nodeOps, _ := t.nodeOps[node]
+		isNodeDelete := nodeOps != nil && nodeOps.deleted
+		if !isNodeDelete {
 			if len(nameKeys) > 0 {
 				kvs = make([]*KeyValue, 0, len(nameKeys))
 				for _, key := range nameKeys {
@@ -418,16 +432,23 @@ func (t *Transaction) deferNameChanges() (err error) {
 					kvs = append(kvs, &KeyValue{Key: key, Value: value})
 				}
 			}
-			names, err := t.Cluster.resolver.Resolve(kvs...)
-			if err != nil {
-				return err
-			}
-			if err = t.Cluster.updateNodeName(t, node, names); err != nil {
+			if names, err = t.Cluster.resolver.Resolve(kvs...); err != nil {
 				return err
 			}
 		}
-
+		if err = t.Cluster.deferUpdateNodeName(t, node, names, isNodeDelete); err != nil {
+			return err
+		}
 	}
+
+	t.DeferOnCommit(t.Cluster.solvePossibleNameConflict)
+	t.DeferOnCommit(func() {
+		hins := make([]*Node, 0, len(updates))
+		for node := range updates {
+			hins = append(hins, node)
+		}
+		t.Cluster.searchAndMergeNodes(t, hins, true)
+	})
 
 	return nil
 }
@@ -780,7 +801,7 @@ func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists
 		log, exists := t.logs[txnKeyRef{key: entry.Key, node: n}]
 		if exists {
 			updated := log.txn.Updated()
-			if _, exists, _ = getExistance(log.new, updated, log.deletion); !exists {
+			if _, exists, _ = getExistence(log.new, updated, log.deletion); !exists {
 				continue
 			}
 		}
@@ -797,7 +818,7 @@ func (t *Transaction) rangeNodeKeys(n *Node, visitFn func(key string, pastExists
 			continue
 		}
 		updated := log.txn.Updated()
-		pastExists, exists, _ := getExistance(log.new, updated, log.deletion)
+		pastExists, exists, _ := getExistence(log.new, updated, log.deletion)
 		if !exists {
 			continue
 		}

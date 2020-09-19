@@ -2,7 +2,7 @@ package util
 
 import "sort"
 
-// RangeOverStringSortedSet ranges over two sorted string set.
+// RangeOverStringSortedSet iterates over two sorted string set.
 func RangeOverStringSortedSet(left, right []string, leftFn, rightFn, innerFn func(*string) bool) {
 	var last *string
 	ll, rl := len(left), len(right)

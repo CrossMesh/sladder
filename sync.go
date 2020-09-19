@@ -43,15 +43,29 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) ([
 	return names, nil
 }
 
-// MergeNodeSnapshot updates node entries by refering to protobuf snapshot.
-func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMissingValidator, failSyncFailure bool) (err error) {
+func (t *Transaction) mergeNode(target, source *Node) (merged bool, err error) {
+	t.lockRelatedNode(source)
+	if err = t.mergeNodeEntries(target, false, false, false, func(fill func(*KeyValue) bool) {
+		for _, entries := range source.kvs {
+			if !fill(&entries.KeyValue) {
+				break
+			}
+		}
+	}); err != nil {
+		return false, err
+	}
+	merged, err = t.RemoveNode(source)
+	return
+}
+
+func (t *Transaction) mergeNodeEntries(n *Node, deletion, failMissingValidator, failSyncFailure bool, iterateEntries func(func(*KeyValue) bool)) (err error) {
 	type diffLog struct {
 		log                     *txnLog
 		value                   string
 		isDelete, originDeleted bool
 	}
 
-	if n == nil || s == nil {
+	if n == nil {
 		return nil
 	}
 
@@ -66,15 +80,8 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 		existingKeySet = make(map[string]struct{})
 	}
 
-	syncEntry := func(entry *KeyValue, validator KVValidator, msgKV *proto.Node_KeyValue) (accepted bool, err error) {
-		if msgKV == nil {
-			accepted, err = validator.Sync(entry, nil)
-		} else {
-			accepted, err = validator.Sync(entry, &KeyValue{
-				Key:   msgKV.Key,
-				Value: msgKV.Value,
-			})
-		}
+	syncEntry := func(entry *KeyValue, validator KVValidator, msgKV *KeyValue) (accepted bool, err error) {
+		accepted, err = validator.Sync(entry, msgKV)
 		if err != nil {
 			if !failSyncFailure {
 				err = nil
@@ -103,21 +110,21 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
-	for _, msg := range s.Kvs {
-		key := msg.Key
+	iterateEntries(func(entry *KeyValue) bool {
+		key := entry.Key
 
 		if log, err = getLatestLog(key); err != nil {
-			return err
+			return false
 		}
 		if log == nil {
-			continue
+			return true
 		}
 
 		latestValue := log.txn.After()
 
 		buf := KeyValue{Key: key, Value: latestValue}
-		if accepted, err = syncEntry(&buf, log.validator, msg); err != nil {
-			return err
+		if accepted, err = syncEntry(&buf, log.validator, entry); err != nil {
+			return false
 		} else if accepted {
 			// save diff.
 			syncLogs = append(syncLogs, &diffLog{log: log, value: buf.Value})
@@ -126,6 +133,11 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 		if deletion {
 			existingKeySet[key] = struct{}{}
 		}
+		return true
+	})
+
+	if err != nil {
+		return err
 	}
 
 	if deletion {
@@ -133,6 +145,13 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 			if _, exists := existingKeySet[key]; !exists {
 				if log, err = getLatestLog(key); err != nil {
 					return false
+				}
+				latestValue := log.txn.After()
+				buf := KeyValue{Key: key, Value: latestValue}
+				if accepted, err = syncEntry(&buf, log.validator, nil); err != nil {
+					return false
+				} else if !accepted {
+					return true
 				}
 				syncLogs = append(syncLogs, &diffLog{log: log, isDelete: true})
 			}
@@ -174,6 +193,7 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 				diff.log.deletion = diff.originDeleted
 			}
 			if ierr := diff.log.txn.SetRawValue(diff.value); ierr != nil {
+				// failed to rollback. transaction is broken.
 				t.errs = append(t.errs, err, ierr, ErrTransactionStateBroken)
 				return t.errs.AsError()
 			}
@@ -181,4 +201,20 @@ func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMi
 	}
 
 	return nil
+}
+
+// MergeNodeSnapshot updates node entries by refering to protobuf snapshot.
+func (t *Transaction) MergeNodeSnapshot(n *Node, s *proto.Node, deletion, failMissingValidator, failSyncFailure bool) (err error) {
+	if n == nil || s == nil {
+		return nil
+	}
+	return t.mergeNodeEntries(n, deletion, failMissingValidator, failSyncFailure, func(fill func(*KeyValue) bool) {
+		for _, msg := range s.Kvs {
+			if !fill(&KeyValue{
+				Key: msg.Key, Value: msg.Value,
+			}) {
+				break
+			}
+		}
+	})
 }

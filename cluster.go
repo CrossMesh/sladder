@@ -45,6 +45,7 @@ type Cluster struct {
 
 	nodeIndexLock sync.RWMutex
 	nodes         map[string]*Node
+	conflictNodes map[*Node]struct{}
 	emptyNodes    map[*Node]struct{}
 
 	self *Node
@@ -79,12 +80,13 @@ func NewClusterWithNameResolver(engine EngineInstance, resolver NodeNameResolver
 	}
 
 	nc := &Cluster{
-		resolver:   resolver,
-		engine:     engine,
-		validators: make(map[string]KVValidator),
-		nodes:      make(map[string]*Node),
-		emptyNodes: make(map[*Node]struct{}),
-		arbiter:    arbit.New(),
+		resolver:      resolver,
+		engine:        engine,
+		validators:    make(map[string]KVValidator),
+		nodes:         make(map[string]*Node),
+		emptyNodes:    make(map[*Node]struct{}),
+		conflictNodes: make(map[*Node]struct{}),
+		arbiter:       arbit.New(),
 	}
 
 	for _, opt := range options {
@@ -189,10 +191,21 @@ checkNodes:
 			if _, exists := c.emptyNodes[n]; exists {
 				continue checkNodes
 			}
+			if _, exists := c.conflictNodes[n]; exists {
+				continue checkNodes
+			}
+			found := false
 			for _, name := range n.names {
-				if _, exists := c.nodes[name]; exists {
+				if node, exists := c.nodes[name]; exists && node == n {
+					found = true
 					continue checkNodes
+				} else if found {
+					c.log.Fatal("[BUG!] conflictNodes doesn't contains a node with name conflict.")
+					break
 				}
+			}
+			if found {
+				continue checkNodes
 			}
 			return false
 		}
@@ -214,7 +227,6 @@ func MostPossibleNode(names []string, getNode func(name string) *Node) (possible
 	if len(names) < 1 {
 		return nil
 	}
-
 	hits, max := make(map[*Node]uint), uint(0)
 	for _, name := range names {
 		node := getNode(name)
@@ -228,7 +240,55 @@ func MostPossibleNode(names []string, getNode func(name string) *Node) (possible
 			possible, max = node, hit
 		}
 	}
+	return
+}
 
+func searchNodeForMerge(
+	n *Node,
+	getNode func(name string) []*Node,
+	getName func(n *Node) []string) (source []*Node, conflicts []*Node) {
+	names := n.names
+	if len(names) < 1 {
+		return nil, nil
+	}
+
+	var hits map[*Node]uint
+
+	hits = make(map[*Node]uint)
+	for _, name := range names {
+		for _, node := range getNode(name) {
+			if node == n {
+				continue
+			}
+			hit, exist := hits[node]
+			if !exist {
+				hit = 0
+			}
+			hit++
+			hits[node] = hit
+		}
+	}
+
+	if len(hits) < 1 {
+		return nil, nil
+	}
+
+	sort.Strings(names)
+
+	fullContained := true
+	notContains := func(s *string) bool {
+		fullContained = false
+		return false
+	}
+	for node := range hits {
+		fullContained = true
+		util.RangeOverStringSortedSet(names, node.names, nil, notContains, nil)
+		if fullContained {
+			source = append(source, node)
+		} else {
+			conflicts = append(conflicts, node)
+		}
+	}
 	return
 }
 
@@ -283,6 +343,9 @@ func (c *Cluster) delayRemoveNode(n *Node) {
 		var errs Errors
 
 		if err := c.Txn(func(t *Transaction) bool {
+			if len(t.Names(n)) > 0 {
+				return false
+			}
 			if _, err := t.RemoveNode(n); err != nil && err != ErrInvalidNode {
 				errs = append(errs, err)
 				return false
@@ -307,7 +370,184 @@ func (c *Cluster) delayRemoveNode(n *Node) {
 	})
 }
 
-func (c *Cluster) updateNodeName(t *Transaction, n *Node, newNames []string) error {
+func (c *Cluster) solvePossibleNameConflict() {
+	for node := range c.conflictNodes {
+		solved := true
+		for _, name := range node.names {
+			if stored, exists := c.nodes[name]; exists {
+				if stored != node {
+					solved = false
+				}
+			} else {
+				c.nodes[name] = node
+			}
+		}
+
+		if solved {
+			delete(c.conflictNodes, node)
+		}
+	}
+}
+
+func (c *Cluster) delayMergeProc(hins []*Node, delay time.Duration) {
+	if delay > 0 {
+		c.arbiter.Go(func() {
+			time.Sleep(delay)
+			c.delayMergeProc(hins, 0)
+		})
+		return
+	}
+
+	c.eventRegistry.queueLock.Lock()
+	defer c.eventRegistry.queueLock.Unlock()
+
+	c.eventRegistry.enqueueWork(func() {
+		if err := c.Txn(func(t *Transaction) bool {
+			return c.searchAndMergeNodes(t, hins, false)
+		}, MembershipModification()); err != nil {
+			c.log.Fatalf("cannot merge nodes. failed to commit transaction. retry later. (err = \"%v\")", err)
+			c.delayMergeProc(hins, time.Second*5)
+		}
+	})
+}
+
+func (c *Cluster) searchAndMergeNodes(t *Transaction, hins []*Node, async bool) (merged bool) {
+	var nameMap map[string][]*Node
+
+	buildHins := hins == nil
+	if !buildHins && len(hins) < 1 {
+		return false
+	}
+
+	if !t.MembershipModification() { // cannot merge in current transaction.
+		async = true
+	}
+
+	if len(c.conflictNodes) > 0 {
+		nameMap = make(map[string][]*Node, len(c.nodes))
+	}
+
+	for name, node := range c.nodes {
+		if buildHins {
+			hins = append(hins, node)
+		}
+		if nameMap != nil {
+			nameMap[name] = []*Node{node}
+		}
+	}
+	for node := range c.conflictNodes {
+		partialConflict := false
+		for _, name := range node.names {
+			if stored, exists := c.nodes[name]; exists && stored != node {
+				nodes, _ := nameMap[name]
+				nodes = append(nodes, node)
+				nameMap[name] = nodes
+			} else {
+				partialConflict = true
+			}
+		}
+		if buildHins && !partialConflict {
+			hins = append(hins, node)
+		}
+	}
+
+	nameFromMap := func(name string) []*Node {
+		if nameMap != nil {
+			nodes, _ := nameMap[name]
+			return nodes
+		}
+		node, _ := c.nodes[name]
+		if node != nil {
+			return []*Node{node}
+		}
+		return nil
+	}
+
+	// search for targets.
+	mergeMap := make(map[*Node]*Node)
+	for _, node := range hins {
+		sources, _ := searchNodeForMerge(node, nameFromMap, func(n *Node) []string {
+			return n.names
+		})
+		if len(sources) < 1 {
+			continue
+		}
+		if async { // force async.
+			c.delayMergeProc(hins, 0)
+			return true
+		}
+		for _, source := range sources {
+			mergeMap[source] = node
+		}
+	}
+
+	if len(mergeMap) < 1 {
+		return false // nothing to merge.
+	}
+
+	// cut the loop edge. (if any)
+	dfs := make(map[*Node]*Node, len(mergeMap))
+	for enter := range mergeMap {
+		vertex := enter
+		for {
+			dfs[vertex] = enter
+			next, _ := mergeMap[vertex]
+			if next == nil {
+				break
+			}
+			if mark, _ := dfs[next]; mark == enter {
+				if next != c.self { // self shouldn't be merging source. preserve this edge.
+					delete(mergeMap, vertex) // cut edge.
+				}
+				break
+			}
+			vertex = next
+		}
+	}
+	dfs = nil // dereference.
+
+	// combine merging chain.
+	// for example, A <-- B <-- C will be reduced to A <-- B and A <-- C.
+	for source, target := range mergeMap {
+		if source == c.self {
+			// hummmm... myself
+			delete(mergeMap, source)
+			continue
+		}
+		actualTarget := target
+		for {
+			parent, hasParent := mergeMap[actualTarget]
+			if !hasParent || parent == nil {
+				break
+			}
+			actualTarget = parent
+		}
+		if actualTarget != target {
+			mergeMap[source] = actualTarget
+		}
+	}
+
+	// merge.
+	if hins != nil {
+		hins = hins[:0]
+	}
+	for source, target := range mergeMap {
+		if ok, err := t.mergeNode(target, source); err != nil {
+			c.log.Fatalf("failed to merge node. [target = %v, source = %v] (err = \"%v\")", t.Names(target), t.Names(source), err)
+			hins = append(hins, source)
+		} else if ok {
+			merged = true
+		}
+	}
+
+	if len(hins) > 0 {
+		c.delayMergeProc(hins, 0)
+	}
+
+	return
+}
+
+func (c *Cluster) deferUpdateNodeName(t *Transaction, n *Node, newNames []string, isNodeDelete bool) error {
 	if len(n.names) < 1 {
 		if len(newNames) < 1 { // no name.
 			t.DeferOnCommit(func() {
@@ -319,7 +559,7 @@ func (c *Cluster) updateNodeName(t *Transaction, n *Node, newNames []string) err
 				c.emitEvent(NodeJoined, n)
 			})
 		}
-	} else if len(newNames) < 1 { // all names removed.
+	} else if len(newNames) < 1 && !isNodeDelete { // all names removed.
 		if !c.PreserveUnnamed && c.self != n {
 			// this transaction has no permission to remove node. delay it.
 			if !t.MembershipModification() {
@@ -335,41 +575,37 @@ func (c *Cluster) updateNodeName(t *Transaction, n *Node, newNames []string) err
 		}
 	}
 
-	sort.Strings(newNames)
-	var mergedNames []string
-
-	deferIndexName := func(name string, node *Node) {
-		t.DeferOnCommit(func() {
-			c.nodes[name] = node
-		})
-	}
-
-	// update name index.
-	util.RangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
-		if s != nil { // remove old name index.
-			t.DeferOnCommit(func() {
-				delete(c.nodes, *s)
-			})
-		}
-		return true
-	}, func(s *string) bool {
-		// new name.
-		stored, exists := c.nodes[*s]
-		if exists && stored != n { // ununique name.
-			c.log.Warnf("drop ununique name %v of node with new names %v", *s, newNames)
-			return true
-		}
-		deferIndexName(*s, n)
-		mergedNames = append(mergedNames, *s)
-		return true
-	}, func(s *string) bool {
-		mergedNames = append(mergedNames, *s)
-		return true
-	})
-
-	// save to node.
 	t.DeferOnCommit(func() {
-		n.assignNames(mergedNames, true)
+		sort.Strings(newNames)
+		var mergedNames []string
+
+		// update name index.
+		util.RangeOverStringSortedSet(n.names, newNames, func(s *string) bool {
+			if s != nil { // remove old name index.
+				node, _ := c.nodes[*s]
+				if node == n {
+					delete(c.nodes, *s)
+				}
+			}
+			return true
+		}, func(s *string) bool {
+			// new name.
+			mergedNames = append(mergedNames, *s)
+			if stored, exists := c.nodes[*s]; exists && stored != n { // conflicts.
+				t.Cluster.conflictNodes[n] = struct{}{}
+			} else {
+				c.nodes[*s] = n
+			}
+			return true
+		}, func(s *string) bool {
+			mergedNames = append(mergedNames, *s)
+			return true
+		})
+
+		if !isNodeDelete {
+			// save to node.
+			n.assignNames(mergedNames, true)
+		}
 	})
 
 	return nil
@@ -472,36 +708,17 @@ func (c *Cluster) protobufSnapshot(s *proto.Cluster, validate func(*Node) bool) 
 }
 
 func (c *Cluster) _removeNode(node *Node) (removed bool) {
+	defer c.emitEvent(NodeRemoved, node)
+
 	// remove from empty node set.
 	if _, exists := c.emptyNodes[node]; exists {
 		delete(c.emptyNodes, node)
-		c.emitEvent(NodeRemoved, node)
 		return true
 	}
 
-	// remove from node set.
-	lastNode := node
-	for _, name := range node.names {
-		if expected, exists := c.nodes[name]; !exists {
-			continue
-		} else if expected != node {
-			if removed && lastNode != expected {
-				// should not happen but log just in case.
-				c.log.Warn("inconsisient node record with node ID \"%v\"", name)
-			}
-			continue
-		} else {
-			delete(c.nodes, name)
-			lastNode = expected
-			removed = true
-		}
-	}
+	delete(c.conflictNodes, node)
 
-	if removed {
-		c.emitEvent(NodeRemoved, node)
-	}
-
-	return
+	return true
 }
 
 // RemoveNode removes node from cluster.

@@ -97,8 +97,12 @@ func ViewpointConsist(vps []*testClusterViewPoint, nodes, entries bool) (consist
 		prevList = nil
 		for _, vp := range vps {
 			entriesList := []string{}
-
+			nodes := make([]*sladder.Node, 0)
 			vp.cv.RangeNodes(func(n *sladder.Node) bool {
+				nodes = append(nodes, n)
+				return true
+			}, false, false)
+			for _, n := range nodes {
 				for _, kv := range n.KeyValueEntries(true) {
 					b, err := json.Marshal(&kvList{Key: kv.Key, Value: kv.Value})
 					if err != nil {
@@ -106,8 +110,7 @@ func ViewpointConsist(vps []*testClusterViewPoint, nodes, entries bool) (consist
 					}
 					entriesList = append(entriesList, string(b))
 				}
-				return true
-			}, false, false)
+			}
 			sort.Strings(entriesList)
 
 			if prevList != nil {

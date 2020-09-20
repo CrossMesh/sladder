@@ -9,6 +9,21 @@ type MockLogger struct {
 	mock.Mock
 }
 
+// Error provides a mock function with given fields: v
+func (_m *MockLogger) Error(v ...interface{}) {
+	var _ca []interface{}
+	_ca = append(_ca, v...)
+	_m.Called(_ca...)
+}
+
+// Errorf provides a mock function with given fields: format, v
+func (_m *MockLogger) Errorf(format string, v ...interface{}) {
+	var _ca []interface{}
+	_ca = append(_ca, format)
+	_ca = append(_ca, v...)
+	_m.Called(_ca...)
+}
+
 // Fatal provides a mock function with given fields: v
 func (_m *MockLogger) Fatal(v ...interface{}) {
 	var _ca []interface{}

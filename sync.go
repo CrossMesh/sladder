@@ -101,7 +101,7 @@ func (t *Transaction) mergeNodeEntries(n *Node, deletion, failMissingValidator, 
 		}
 		if log.txn == nil {
 			err = fmt.Errorf("Got nil KVTransaction in op log. {key = %v, node = %v}", key, n.PrintableName())
-			t.Cluster.log.Fatal(err.Error())
+			t.Cluster.log.Error(err.Error())
 			return log, err
 		}
 		return log, nil

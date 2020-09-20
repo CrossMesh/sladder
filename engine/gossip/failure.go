@@ -149,12 +149,12 @@ func (e *EngineInstance) updateEngineRelatedFields(t *sladder.Transaction,
 	for node, idx := range nodes {
 		rtx, err := t.KV(node, e.swimTagKey)
 		if err != nil {
-			e.log.Fatalf("engine cannot trace swim tag. (err = \"%v\")", err)
+			e.log.Errorf("engine cannot trace swim tag. (err = \"%v\")", err)
 			return false, err
 		}
 		tag, oldTag := rtx.(*SWIMTagTxn), &SWIMTag{}
 		if err := oldTag.Decode(tag.Before()); err != nil {
-			e.log.Fatalf("failed to decode old SWIM tag. (err = \"%v\")", err)
+			e.log.Errorf("failed to decode old SWIM tag. (err = \"%v\")", err)
 			return false, err
 		}
 
@@ -335,11 +335,11 @@ func (e *EngineInstance) removeIfDeadOrLeft(node *sladder.Node, tag *SWIMTag) {
 		nodeSet, exists := e.withRegion[tag.Region]
 		if !exists {
 			// should not reach this.
-			e.log.Fatal("[BUG!] a node not traced by region map.")
+			e.log.Error("[BUG!] a node not traced by region map.")
 			removed = true
 		} else if _, inNodeSet := nodeSet[node]; !inNodeSet {
 			// should not reach this.
-			e.log.Fatal("[BUG!] a node not in region node set.")
+			e.log.Error("[BUG!] a node not in region node set.")
 			removed = true
 		} else if tag.State == LEFT ||
 			uint(len(nodeSet)) > e.minRegionPeer { // limitation of region peer count.
@@ -413,13 +413,13 @@ func (e *EngineInstance) ClearSuspections() {
 				// claim dead.
 				rtx, err := t.KV(node, e.swimTagKey)
 				if err != nil {
-					e.log.Fatalf("get key-value in claiming dead transaction failure. {node = %v} (err = %v)", node.PrintableName(), err.Error())
+					e.log.Errorf("get key-value in claiming dead transaction failure. {node = %v} (err = %v)", node.PrintableName(), err.Error())
 					return false
 				}
 				tag := rtx.(*SWIMTagTxn)
 				return tag.ClaimDead()
 			}); err != nil {
-				e.log.Fatalf("failed to commit dead claiming transaction. {node = %v} (err = %v)", node.PrintableName(), err.Error())
+				e.log.Errorf("failed to commit dead claiming transaction. {node = %v} (err = %v)", node.PrintableName(), err.Error())
 				break
 			}
 		}
@@ -456,7 +456,7 @@ func (e *EngineInstance) processFailureDetectionProto(from []string, msg *pb.Gos
 	case pb.GossipMessage_Ack:
 		ack := &pb.Ack{}
 		if err := ptypes.UnmarshalAny(msg.Body, ack); err != nil {
-			e.log.Fatal("invalid ack body, got " + err.Error())
+			e.log.Error("invalid ack body, got " + err.Error())
 			break
 		}
 		e.onPingAck(from, ack)
@@ -464,7 +464,7 @@ func (e *EngineInstance) processFailureDetectionProto(from []string, msg *pb.Gos
 	case pb.GossipMessage_Ping:
 		ping := &pb.Ping{}
 		if err := ptypes.UnmarshalAny(msg.Body, ping); err != nil {
-			e.log.Fatal("invalid ping body, got " + err.Error())
+			e.log.Error("invalid ping body, got " + err.Error())
 			break
 		}
 		e.onPing(from, ping)
@@ -472,7 +472,7 @@ func (e *EngineInstance) processFailureDetectionProto(from []string, msg *pb.Gos
 	case pb.GossipMessage_PingReq:
 		pingReq := &pb.PingReq{}
 		if err := ptypes.UnmarshalAny(msg.Body, pingReq); err != nil {
-			e.log.Fatal("invalid ping-req body, got " + err.Error())
+			e.log.Error("invalid ping-req body, got " + err.Error())
 			break
 		}
 		e.onPingReq(from, pingReq)
@@ -629,7 +629,7 @@ func (e *EngineInstance) processPingReqTimeout(node *sladder.Node) {
 		{
 			rtx, err := t.KV(node, e.swimTagKey)
 			if err != nil {
-				e.log.Fatal("cannot get KV Txn when claiming suspection, got " + err.Error())
+				e.log.Error("cannot get KV Txn when claiming suspection, got " + err.Error())
 				return false
 			}
 			tag := rtx.(*SWIMTagTxn)
@@ -637,7 +637,7 @@ func (e *EngineInstance) processPingReqTimeout(node *sladder.Node) {
 		}
 		return true
 	}); err != nil {
-		e.log.Fatal("transaction commit failure when claiming suspection, got " + err.Error())
+		e.log.Error("transaction commit failure when claiming suspection, got " + err.Error())
 	}
 
 	e.lock.Lock()

@@ -678,7 +678,7 @@ func (t *Transaction) getLatestLog(n *Node, key string, create bool, lc uint32) 
 
 	// create entry transaction
 	if txn, err = validator.Txn(*snap); err != nil {
-		t.Cluster.log.Fatalf("validator of key \"%v\" failed to create transaction: " + err.Error())
+		t.Cluster.log.Errorf("validator of key \"%v\" failed to create transaction: " + err.Error())
 		return nil, false, err
 	}
 

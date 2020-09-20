@@ -324,16 +324,16 @@ func (e *EngineInstance) sendProto(names []string, body protoiface.MessageV1) {
 	ty := reflect.TypeOf(body)
 	typeID, valid := pb.GossipMessageTypeID[ty]
 	if !valid {
-		e.log.Fatal("sendProtobuf() got invalid protobuf message type \"" + ty.Name() + "\"")
+		e.log.Error("sendProtobuf() got invalid protobuf message type \"" + ty.Name() + "\"")
 		return
 	}
 	msg.Type = typeID
 	if msg.Body, err = ptypes.MarshalAny(body); err != nil {
-		e.log.Fatal("failed to marshal message body, got: " + err.Error())
+		e.log.Error("failed to marshal message body, got: " + err.Error())
 		return
 	}
 	if raw, err = proto.Marshal(&msg); err != nil {
-		e.log.Fatal("failed to marshal gossip message, got: " + err.Error())
+		e.log.Error("failed to marshal gossip message, got: " + err.Error())
 		return
 	}
 	e.transport.Send(names, raw)
@@ -473,11 +473,11 @@ func (e *EngineInstance) onSWIMTagUpdated(ctx *sladder.WatchEventContext, meta s
 		old, new := &SWIMTag{}, &SWIMTag{}
 		meta := meta.(sladder.KeyChangeEventMetadata)
 		if err := old.Decode(meta.Old()); err != nil {
-			e.log.Fatal("cannot decode old swim tag, got " + err.Error())
+			e.log.Error("cannot decode old swim tag, got " + err.Error())
 			break
 		}
 		if err := new.Decode(meta.New()); err != nil {
-			e.log.Fatal("cannot decode new swim tag, got " + err.Error())
+			e.log.Error("cannot decode new swim tag, got " + err.Error())
 			break
 		}
 
@@ -538,7 +538,7 @@ func (e *EngineInstance) Close() error {
 		{
 			rtx, err := t.KV(e.cluster.Self(), e.swimTagKey)
 			if err != nil {
-				e.log.Fatal("transaction get key-value failure, got " + err.Error())
+				e.log.Error("transaction get key-value failure, got " + err.Error())
 				return false
 			}
 			tag := rtx.(*SWIMTagTxn)
@@ -546,7 +546,7 @@ func (e *EngineInstance) Close() error {
 		}
 		return true
 	}); err != nil {
-		e.log.Fatal("leave transaction failure, got " + err.Error())
+		e.log.Error("leave transaction failure, got " + err.Error())
 		return err
 	}
 

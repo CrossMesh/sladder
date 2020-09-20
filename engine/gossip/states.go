@@ -299,7 +299,7 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 	if !t.KeyExists(self, e.swimTagKey) {
 		rtx, err := t.KV(self, e.swimTagKey)
 		if err != nil {
-			e.log.Fatalf("cannot get kv transaction when recovering from missing SWIM tag. (err = %v) ", err.Error())
+			e.log.Errorf("cannot get kv transaction when recovering from missing SWIM tag. (err = %v) ", err.Error())
 			return false, err
 		}
 		tag := rtx.(*SWIMTagTxn)
@@ -327,7 +327,7 @@ func (e *EngineInstance) ensureTransactionCommitIntegrity(t *sladder.Transaction
 	if len(addList)+len(removeList) > 0 { // sync existing keys to entry list.
 		rtx, err := t.KV(self, e.swimTagKey)
 		if err != nil {
-			e.log.Fatalf("engine cannot update entry list in swim tag. err = \"%v\"", err)
+			e.log.Errorf("engine cannot update entry list in swim tag. err = \"%v\"", err)
 			return false, err
 		}
 		swim := rtx.(*SWIMTagTxn)
@@ -350,12 +350,12 @@ func (e *EngineInstance) onSelfSWIMStateChanged(self *sladder.Node, old, new *SW
 		if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 			rtx, err := t.KV(self, e.swimTagKey)
 			if err != nil {
-				e.log.Fatal("cannot get kv transaction when clearing false positives, got " + err.Error())
+				e.log.Error("cannot get kv transaction when clearing false positives, got " + err.Error())
 				return false
 			}
 			return rtx.(*SWIMTagTxn).ClaimAlive()
 		}); err != nil {
-			e.log.Fatal("cannot commit transaction when clearing false positives, got " + err.Error())
+			e.log.Error("cannot commit transaction when clearing false positives, got " + err.Error())
 		}
 	}
 }

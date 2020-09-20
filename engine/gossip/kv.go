@@ -44,13 +44,13 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 
 		rtx, err := t.KV(op.Node, e.swimTagKey)
 		if err != nil {
-			e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
+			e.log.Errorf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
 			return false, err
 		}
 		meta.swim = rtx.(*SWIMTagTxn)
 		meta.oldTag = &SWIMTag{}
 		if err := meta.oldTag.Decode(meta.swim.Before()); err != nil {
-			e.log.Fatalf("failed to decode old SWIM tag. (err = \"%v\")", err)
+			e.log.Errorf("failed to decode old SWIM tag. (err = \"%v\")", err)
 			return false, err
 		}
 
@@ -104,7 +104,7 @@ func (e *EngineInstance) enforceTransactionCommitLimit(t *sladder.Transaction, i
 		if meta.swim == nil {
 			rtx, err := t.KV(node, e.swimTagKey)
 			if err != nil {
-				e.log.Fatalf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
+				e.log.Errorf("engine cannot update entry list in swim tag. (err = \"%v\")", err)
 				return false, err
 			}
 			swim = rtx.(*SWIMTagTxn)

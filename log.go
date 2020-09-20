@@ -13,6 +13,8 @@ func (l *discardLogger) Warn(v ...interface{})                  {}
 func (l *discardLogger) Warnf(format string, v ...interface{})  {}
 func (l *discardLogger) Fatal(v ...interface{})                 {}
 func (l *discardLogger) Fatalf(format string, v ...interface{}) {}
+func (l *discardLogger) Error(v ...interface{})                 {}
+func (l *discardLogger) Errorf(format string, v ...interface{}) {}
 
 var (
 	// DefaultLogger implements defaule logging behaviours.
@@ -23,6 +25,9 @@ var (
 type Logger interface {
 	Fatal(v ...interface{})
 	Fatalf(format string, v ...interface{})
+
+	Error(v ...interface{})
+	Errorf(format string, v ...interface{})
 
 	Panic(v ...interface{})
 	Panicf(format string, v ...interface{})

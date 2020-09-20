@@ -200,7 +200,7 @@ checkNodes:
 					found = true
 					continue checkNodes
 				} else if found {
-					c.log.Fatal("[BUG!] conflictNodes doesn't contains a node with name conflict.")
+					c.log.Error("[BUG!] conflictNodes doesn't contains a node with name conflict.")
 					break
 				}
 			}
@@ -358,7 +358,7 @@ func (c *Cluster) delayRemoveNode(n *Node) {
 		if err := errs.AsError(); err != nil {
 			// should not happen but just in case.
 			c.arbiter.Go(func() {
-				c.log.Fatalf("transaction fails when removing a empty node. retry in 5 seconds. (err = \"%v\")", errs.AsError())
+				c.log.Errorf("transaction fails when removing a empty node. retry in 5 seconds. (err = \"%v\")", errs.AsError())
 				errs = nil
 				select {
 				case <-time.After(time.Second):
@@ -405,7 +405,7 @@ func (c *Cluster) delayMergeProc(hins []*Node, delay time.Duration) {
 		if err := c.Txn(func(t *Transaction) bool {
 			return c.searchAndMergeNodes(t, hins, false)
 		}, MembershipModification()); err != nil {
-			c.log.Fatalf("cannot merge nodes. failed to commit transaction. retry later. (err = \"%v\")", err)
+			c.log.Errorf("cannot merge nodes. failed to commit transaction. retry later. (err = \"%v\")", err)
 			c.delayMergeProc(hins, time.Second*5)
 		}
 	})
@@ -533,7 +533,7 @@ func (c *Cluster) searchAndMergeNodes(t *Transaction, hins []*Node, async bool) 
 	}
 	for source, target := range mergeMap {
 		if ok, err := t.mergeNode(target, source); err != nil {
-			c.log.Fatalf("failed to merge node. [target = %v, source = %v] (err = \"%v\")", t.Names(target), t.Names(source), err)
+			c.log.Errorf("failed to merge node. [target = %v, source = %v] (err = \"%v\")", t.Names(target), t.Names(source), err)
 			hins = append(hins, source)
 		} else if ok {
 			merged = true

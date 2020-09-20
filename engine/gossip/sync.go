@@ -133,7 +133,6 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 	}
 
 	isResponse := false
-	rawMessageID := sync.Id - e.counterSeed
 
 	if r, inSync := e.inSync.Load(sync.Id); inSync {
 		to := r.([]string)
@@ -397,27 +396,30 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			}
 		}
 
-		// stage: trace self existence seen by others.
-		if fromNode != nil {
-			e.lock.Lock()
+		if isResponse {
+			rawMessageID := sync.Id - e.counterSeed
 
-			trace, _ := e.reversedExistence[fromNode]
-			if trace == nil {
-				trace = &reversedExistenceItem{}
-				e.reversedExistence[fromNode] = trace
-			}
-			if rawMessageID > trace.epoch {
-				trace.epoch, trace.exist = rawMessageID, selfSeen
-			}
-			e.lock.Unlock()
-		}
+			// stage: trace self existence seen by others.
+			if fromNode != nil {
+				e.lock.Lock()
 
-		if isResponse &&
-			e.quitAfter > 0 && selfSeen { // quiting. determine whether quit condition is reached.
-			// ensure LEAVE state included in this synchronizaion.
-			if rawMessageID >= e.quitAfter {
-				// LEAVE state has spreaded.
-				e.canQuit = true
+				trace, _ := e.reversedExistence[fromNode]
+				if trace == nil {
+					trace = &reversedExistenceItem{}
+					e.reversedExistence[fromNode] = trace
+				}
+				if rawMessageID > trace.epoch {
+					trace.epoch, trace.exist = rawMessageID, selfSeen
+				}
+				e.lock.Unlock()
+			}
+
+			if e.quitAfter > 0 && selfSeen { // quiting. determine whether quit condition is reached.
+				// ensure LEAVE state included in this synchronizaion.
+				if rawMessageID >= e.quitAfter {
+					// LEAVE state has spreaded.
+					e.canQuit = true
+				}
 			}
 		}
 

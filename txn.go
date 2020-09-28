@@ -714,14 +714,6 @@ func (t *Transaction) KV(n *Node, key string) (txn KVTransaction, err error) {
 	}
 
 	lc := atomic.AddUint32(&t.lc, 1) // increase logic clock.
-	ref := txnKeyRef{node: n, key: key}
-
-	t.lock.RLock()
-	log := t.getCacheLog(ref, lc)
-	t.lock.RUnlock()
-	if log != nil && log.txn != nil {
-		return log.txn, nil
-	}
 
 	t.lock.Lock()
 	defer t.lock.Unlock()

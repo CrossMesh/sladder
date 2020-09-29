@@ -179,15 +179,13 @@ type EngineInstance struct {
 	reversedExistence     map[*sladder.Node]*reversedExistenceItem // trace self-existence from other nodes.
 	canQuit               bool
 
-	// events.
-	pingTimeoutEvent    chan *sladder.Node // ping timeout event.
-	pingReqTimeoutEvent chan *sladder.Node // ping-req timeout event.
-
-	// failure detector fields
+	// failure detector fields.
 	inPing              map[*sladder.Node]*pingContext  // nodes in ping progress
 	roundTrips          map[*sladder.Node]time.Duration // round-trip time trace.
 	suspectionNodeIndex map[*sladder.Node]*suspection   // suspection indexed by node ptr.
 	suspectionQueue     suspectionQueue                 // heap order by suspection.notAfter.
+	pingTimeoutEvent    chan *sladder.Node              // ping timeout event.
+	pingReqTimeoutEvent chan *sladder.Node              // ping-req timeout event.
 
 	Metrics Metrics
 }

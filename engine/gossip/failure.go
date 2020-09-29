@@ -480,6 +480,12 @@ func (e *EngineInstance) processFailureDetectionProto(from []string, msg *pb.Gos
 }
 
 func (e *EngineInstance) ping(node *sladder.Node, proxyReq *proxyPingRequest) {
+	if node == nil {
+		return
+	}
+
+	names := node.Names()
+
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
@@ -487,7 +493,7 @@ func (e *EngineInstance) ping(node *sladder.Node, proxyReq *proxyPingRequest) {
 
 	if pingCtx == nil { // not in progres.
 		id := e.generateMessageID()
-		defer e.sendProto(node.Names(), &pb.Ping{
+		defer e.sendProto(names, &pb.Ping{
 			Id: id,
 		})
 

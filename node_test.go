@@ -45,6 +45,8 @@ func TestNode(t *testing.T) {
 	})
 
 	t.Run("test_snapshot", func(t *testing.T) {
+		model1 := StringValidator{}
+
 		kvs := map[string]string{
 			"snk1": "v1",
 			"snk2": "v2",
@@ -62,6 +64,37 @@ func TestNode(t *testing.T) {
 			excepted, exist := kvs[kv.Key]
 			assert.True(t, exist)
 			assert.Equal(t, excepted, kv.Value)
+		}
+
+		for _, kv := range self.KeyValueEntries(true) {
+			excepted, exist := kvs[kv.Key]
+			assert.True(t, exist)
+			assert.Equal(t, excepted, kv.Value)
+		}
+	})
+
+	t.Run("test_key_value_entries", func(t *testing.T) {
+		prefix := "prefix"
+		model1 := StringValidator{}
+		m := WrapTestKVTransaction("prefix", model1)
+
+		kvs := map[string]string{
+			"snk1": "v1",
+			"snk2": "v2",
+			"snk3": "v3",
+		}
+		for k, v := range kvs {
+			assert.NoError(t, c.RegisterKey(k, m, true, 0))
+			assert.Nil(t, self._set(k, prefix+v))
+		}
+
+		msg := proto.Node{}
+		self.ProtobufSnapshot(&msg)
+		assert.Equal(t, 3, len(msg.Kvs))
+		for _, kv := range msg.Kvs {
+			excepted, exist := kvs[kv.Key]
+			assert.True(t, exist)
+			assert.Equal(t, prefix+excepted, kv.Value)
 		}
 
 		for _, kv := range self.KeyValueEntries(true) {

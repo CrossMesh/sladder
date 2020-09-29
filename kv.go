@@ -31,17 +31,31 @@ type KVExtendedSyncer interface {
 
 // KVTransaction implements atomic operation.
 type KVTransaction interface {
-	// TODO(xutao): seperate 'updated' and 'newValue'
-	Updated() bool            // Updated return whether value is updated.
+	Updated() bool            // Updated reports whether value is updated.
 	After() string            // After returns new value.
-	Before() string           // Before return origin raw value.
-	SetRawValue(string) error // SetRawValue set new raw value.
+	Before() string           // Before returns origin raw value.
+	SetRawValue(string) error // SetRawValue sets new raw value.
 }
 
 // KVTransactionWrapper wraps KVTransaction.
 type KVTransactionWrapper interface {
 	KVTransaction
 	KVTransaction() KVTransaction
+}
+
+func getRealTransaction(txn KVTransaction) KVTransaction {
+	for {
+		wrapper, wrapped := txn.(KVTransactionWrapper)
+		if !wrapped || wrapper == nil {
+			break
+		}
+		real := wrapper.KVTransaction()
+		if real == nil {
+			break
+		}
+		txn = real
+	}
+	return txn
 }
 
 // KeyValueEntry holds KeyValue.

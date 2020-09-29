@@ -61,16 +61,20 @@ func (n *Node) Keys(keys ...string) *OperationContext {
 }
 
 // KeyValueEntries return array existing entries.
+// If entry value is wrapped, it returns the inner value.
 func (n *Node) KeyValueEntries(clone bool) (entries []*KeyValue) {
 	n.lock.RLock()
 	defer n.lock.RUnlock()
 
-	return n.keyValueEntries(clone)
+	return n.keyValueRealEntries(clone)
 }
 
-func (n *Node) keyValueEntries(clone bool) (entries []*KeyValue) {
+func (n *Node) keyValueRealEntries(clone bool) (entries []*KeyValue) {
 	for _, entry := range n.kvs {
-		kv := &entry.KeyValue
+		kv := n.cluster.getRealEntry(&entry.KeyValue)
+		if kv == nil {
+			continue
+		}
 		if clone {
 			kv = kv.Clone()
 		}
@@ -132,7 +136,7 @@ func (n *Node) _set(key, value string) error {
 			continue
 		}
 		n.kvs[key] = newEntry
-		n.cluster.emitKeyInsertion(n, newEntry.Key, newEntry.Value, n.keyValueEntries(true))
+		n.cluster.emitKeyInsertion(n, newEntry.Key, newEntry.Value, n.keyValueRealEntries(true))
 		n.lock.Unlock()
 		return nil
 	}
@@ -149,7 +153,7 @@ func (n *Node) _set(key, value string) error {
 	origin := entry.Value
 	entry.Value = value
 	entry.Key = key
-	n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value, n.keyValueEntries(true))
+	n.cluster.emitKeyChange(n, entry.Key, origin, entry.Value, n.keyValueRealEntries(true))
 
 	return nil
 }

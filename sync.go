@@ -28,31 +28,11 @@ func (c *Cluster) resolveNodeNameFromProtobuf(entries []*proto.Node_KeyValue) ([
 	}
 
 	watchEntries := make([]*KeyValue, 0, len(watchKeySet))
-	actualEntry := KeyValue{}
 	for _, kv := range watchKeySet {
 		if kv == nil {
 			continue
 		}
-		validator, hasValidator := c.validators[kv.Key]
-		if !hasValidator || validator == nil {
-			continue
-		}
-		actualEntry.Key, actualEntry.Value = kv.Key, kv.Value
-		rtx, err := validator.Txn(actualEntry)
-		if err != nil {
-			return nil, err
-		}
-		for {
-			wrapper, wrapped := rtx.(KVTransactionWrapper)
-			if wrapped && wrapper != nil {
-				rtx = wrapper.KVTransaction()
-				continue
-			}
-			break
-		}
-		watchEntries = append(watchEntries, &KeyValue{
-			Key: kv.Key, Value: rtx.Before(),
-		})
+		watchEntries = append(watchEntries, c.getRealEntry(kv))
 	}
 
 	names, err := c.resolver.Resolve(watchEntries...)

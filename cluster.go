@@ -175,6 +175,32 @@ func (c *Cluster) ContainNodes(nodes ...interface{}) bool {
 	return c.containNodes(nodes...)
 }
 
+func (c *Cluster) getRealEntry(kv *KeyValue) *KeyValue {
+	if kv == nil {
+		return nil
+	}
+	validator, _ := c.validators[kv.Key]
+	if validator == nil {
+		// no validator. treat it unwrapped.
+		return kv
+	}
+	txn, err := validator.Txn(*kv)
+	if err != nil {
+		// KVValidator must ensure invalid value will not be stored, so normally this should not happen.
+		// But we report the error and treat entry unwrapped in case.
+		c.log.Errorf("failed to start KVTransaction. (err = %v)", err)
+		return kv
+	}
+	real := getRealTransaction(txn)
+	if real == txn {
+		return kv
+	}
+	return &KeyValue{
+		Key:   kv.Key,
+		Value: real.Before(),
+	}
+}
+
 func (c *Cluster) containNodes(nodes ...interface{}) bool {
 checkNodes:
 	for _, raw := range nodes {

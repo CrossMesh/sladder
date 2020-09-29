@@ -524,13 +524,24 @@ func (t *Transaction) commit() (finalOps []*transactionFinalOp) {
 		}
 	}
 
+	entriesSnap := make(map[*Node][]*KeyValue)
+
+	getEntriesSnap := func(node *Node) []*KeyValue {
+		cached, _ := entriesSnap[node]
+		if cached == nil {
+			cached = node.keyValueRealEntries(true)
+			entriesSnap[node] = cached
+		}
+		return cached
+	}
+
 	for ref, log := range t.logs {
 		entry, exists := ref.node.kvs[ref.key]
 		if log.txn == nil {
 			continue
 		}
-
 		updated, newValue := log.txn.Updated(), log.txn.After()
+		realNewValue := getRealTransaction(log.txn).After()
 		deleted := log.deletion && !updated
 		if exists && entry != nil { // exists.
 			if deleted {
@@ -539,7 +550,7 @@ func (t *Transaction) commit() (finalOps []*transactionFinalOp) {
 			} else if updated { // updated.
 				origin := entry.Value
 				entry.Value = newValue
-				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, newValue, ref.node.keyValueEntries(true))
+				t.Cluster.emitKeyChange(ref.node, entry.Key, origin, realNewValue, getEntriesSnap(ref.node))
 			}
 			t.Defer(entry.lock.Unlock)
 
@@ -552,12 +563,12 @@ func (t *Transaction) commit() (finalOps []*transactionFinalOp) {
 				validator: log.validator,
 			}
 			ref.node.kvs[ref.key] = entry
-			t.Cluster.emitKeyInsertion(ref.node, entry.Key, newValue, ref.node.keyValueEntries(true))
+			t.Cluster.emitKeyInsertion(ref.node, entry.Key, realNewValue, getEntriesSnap(ref.node))
 		}
 	}
 
 	for idx, entry := range removedEntries { // send delete events.
-		t.Cluster.emitKeyDeletion(removedRefs[idx].node, entry.Key, entry.Value, removedRefs[idx].node.keyValueEntries(true))
+		t.Cluster.emitKeyDeletion(removedRefs[idx].node, entry.Key, entry.Value, getEntriesSnap(removedRefs[idx].node))
 	}
 
 	t.Defer(t.cleanLocks) // unlock all.

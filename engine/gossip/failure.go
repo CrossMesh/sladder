@@ -317,6 +317,58 @@ func (e *EngineInstance) traceLeavingNode(node *leavingNode) {
 	e.setLeavingNodeTimeout(node)
 }
 
+func (e *EngineInstance) clearDeads() {
+	if err := e.cluster.Txn(func(t *sladder.Transaction) (changed bool) {
+		changed = false
+
+		e.lock.Lock()
+		defer e.lock.Unlock()
+
+		minRegionPeer := int(e.minRegionPeer)
+
+		for _, nodes := range e.withRegion {
+			curNum := len(nodes)
+			if minRegionPeer >= curNum {
+				continue
+			}
+			allows := curNum - minRegionPeer
+
+			for node := range nodes {
+				if allows < 1 {
+					break
+				}
+
+				rtx, err := t.KV(node, e.swimTagKey)
+				if err != nil {
+					e.log.Warn("cannot get SWIM tag of node %v. skip. (err = \"%v\")", t.Names(node), err)
+					continue
+				}
+				tag := rtx.(*SWIMTagTxn)
+				if tag.State() == DEAD && allows > 0 {
+					t.RemoveNode(node)
+					changed = true
+					allows--
+				}
+			}
+		}
+
+		return
+	}, sladder.MembershipModification()); err != nil {
+		e.log.Error("failed to clear dead nodes. got transaction failure. retry later. (err = \"%v\")", err)
+		e.delayClearDeads(time.Second * 5)
+	}
+}
+
+func (e *EngineInstance) delayClearDeads(delay time.Duration) {
+	// TODO(xutao): submit to cluster's job queue instead.
+	e.arbiter.Go(func() {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		e.clearDeads()
+	})
+}
+
 func (e *EngineInstance) removeIfDeadOrLeft(node *sladder.Node, tag *SWIMTag) {
 	if tag.State != DEAD && tag.State != LEFT {
 		return

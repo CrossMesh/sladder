@@ -475,4 +475,116 @@ func TestFailureDetector(t *testing.T) {
 			dumpSingleViewPoint(t, vps[0], true, true)
 		}
 	})
+
+	t.Run("min_region_peer_changes", func(t *testing.T) {
+		t.Parallel()
+		god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 8, []sladder.EngineOption{
+			WithGossipPeriod(period),
+			WithMinRegionPeer(8),
+		}, nil)
+		assert.NotNil(t, god)
+		assert.NotNil(t, ctl)
+		assert.NoError(t, err)
+		vps := god.VPList()
+		checkInitialSWIMStates(t, god)
+
+		partiitionNamesSet := map[string]struct{}{}
+
+		for _, vp := range vps[:4] {
+			names := vp.cv.Self().Names()
+			t.Log("seperated node: ", names)
+			ctl.NetworkOutJam(names)
+			ctl.NetworkInJam(names)
+			for _, name := range names {
+				partiitionNamesSet[name] = struct{}{}
+			}
+		}
+
+		consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+			time.Sleep(period)
+			unconsist = false
+
+			for _, vp := range vps[:4] {
+				vp.cv.Txn(func(tx *sladder.Transaction) bool {
+					tx.RangeNode(func(node *sladder.Node) bool {
+						rtx, err := tx.KV(node, vp.engine.swimTagKey)
+						if !assert.NoError(t, err) {
+							t.FailNow()
+							return false
+						}
+						tag := rtx.(*SWIMTagTxn)
+						if DEAD != tag.State() {
+							unconsist = true
+							return false
+						}
+						return true
+					}, true, true)
+
+					return false
+				}, sladder.MembershipModification())
+			}
+
+			for _, vp := range vps[4:] {
+				vp.cv.Txn(func(tx *sladder.Transaction) bool {
+					tx.RangeNode(func(node *sladder.Node) bool {
+						exceptDead := false
+						for _, name := range tx.Names(node) {
+							_, has := partiitionNamesSet[name]
+							if has {
+								exceptDead = true
+								break
+							}
+						}
+						if exceptDead {
+							rtx, err := tx.KV(node, vp.engine.swimTagKey)
+							if !assert.NoError(t, err) {
+								t.FailNow()
+								return false
+							}
+							tag := rtx.(*SWIMTagTxn)
+							if DEAD != tag.State() {
+								unconsist = true
+								return false
+							}
+						}
+						return true
+					}, true, true)
+
+					return false
+				}, sladder.MembershipModification())
+			}
+
+			return
+		}, true, true, false, func(e *EngineInstance) {
+			e.ClusterSync()
+			e.DetectFailure()
+			e.ClearSuspections()
+		})
+
+		if !assert.Less(t, consistAt, 200, "cluster doesn't be consist within 200 round.") {
+			time.Sleep(period)
+			dumpViewPoint(t, vps, true, true)
+		} else {
+			t.Log("group state is consist at round", consistAt)
+			t.Log("one of viewpoint: ")
+			dumpSingleViewPoint(t, vps[0], true, true)
+		}
+
+		for _, vp := range vps {
+			cnt := 0
+			vp.cv.RangeNodes(func(node *sladder.Node) bool { cnt++; return true }, false, true)
+			assert.Equal(t, 8, cnt)
+		}
+
+		for _, vp := range vps {
+			vp.engine.SetMinRegionPeer(6)
+			vp.engine.clearDeads()
+		}
+
+		for _, vp := range vps {
+			cnt := 0
+			vp.cv.RangeNodes(func(node *sladder.Node) bool { cnt++; return true }, false, true)
+			assert.Equal(t, 6, cnt)
+		}
+	})
 }

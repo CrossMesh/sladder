@@ -245,6 +245,21 @@ func (e *EngineInstance) SetRegion(new string) (old string, err error) {
 	return
 }
 
+// SetMinRegionPeer sets the minimum number of peers in region.
+// DEAD peers will be preserved to achieve the minimum number. This helps to recover from network partiation.
+func (e *EngineInstance) SetMinRegionPeer(n uint) (old uint) {
+	e.lock.Lock()
+	old = e.minRegionPeer
+	e.minRegionPeer = n
+	e.lock.Unlock()
+
+	if old > n {
+		e.delayClearDeads(0)
+	}
+
+	return
+}
+
 func (e *EngineInstance) generateMessageID() uint64 {
 	return atomic.AddUint64(&e.messageCounter, 1) + e.counterSeed
 }

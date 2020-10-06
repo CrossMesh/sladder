@@ -319,6 +319,9 @@ func (e *EngineInstance) traceLeavingNode(node *leavingNode) {
 
 func (e *EngineInstance) clearDeads() {
 	if err := e.cluster.Txn(func(t *sladder.Transaction) (changed bool) {
+		// mark txn internal.
+		e.innerTxnIDs.Store(t.ID(), struct{}{})
+
 		changed = false
 
 		e.lock.Lock()
@@ -382,6 +385,9 @@ func (e *EngineInstance) removeIfDeadOrLeft(node *sladder.Node, tag *SWIMTag) {
 	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
 		e.lock.Lock()
 		defer e.lock.Unlock()
+
+		// mark txn internal.
+		e.innerTxnIDs.Store(t.ID(), struct{}{})
 
 		removed := false
 		nodeSet, exists := e.withRegion[tag.Region]
@@ -462,6 +468,9 @@ func (e *EngineInstance) ClearSuspections() {
 			node := deads[idx]
 
 			if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+				// mark txn internal.
+				e.innerTxnIDs.Store(t.ID(), struct{}{})
+
 				// claim dead.
 				rtx, err := t.KV(node, e.swimTagKey)
 				if err != nil {
@@ -684,6 +693,9 @@ func (e *EngineInstance) processPingReqTimeout(node *sladder.Node) {
 
 	// raise suspection.
 	if err := e.cluster.Txn(func(t *sladder.Transaction) bool {
+		// mark txn internal.
+		e.innerTxnIDs.Store(t.ID(), struct{}{})
+
 		{
 			rtx, err := t.KV(node, e.swimTagKey)
 			if err != nil {

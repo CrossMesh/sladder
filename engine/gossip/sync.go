@@ -10,7 +10,6 @@ import (
 	"github.com/crossmesh/sladder"
 	pb "github.com/crossmesh/sladder/engine/gossip/pb"
 	"github.com/crossmesh/sladder/proto"
-	"github.com/crossmesh/sladder/util"
 	"github.com/golang/protobuf/ptypes"
 )
 
@@ -97,26 +96,15 @@ func (e *EngineInstance) ClusterSync() {
 		return false
 	}, sladder.MembershipModification())
 
-	setTimeout := func(id uint64) {
-		time.AfterFunc(e.getGossipPeriod()*10, func() {
-			if _, exists := e.inSync.Load(id); exists {
-				atomic.AddUint64(&e.Metrics.Sync.Timeout, 1)
-				atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF)
-				e.inSync.Delete(id)
-			}
-		})
-	}
-
 	for _, node := range nodes {
 		id := e.generateMessageID()
-		e.inSync.Store(id, node)
-		setTimeout(id)
 		e.sendProto(node, &pb.Sync{
 			Id:      id,
 			Cluster: snap,
+			Type:    pb.Sync_PushPull,
 		})
 
-		atomic.AddUint64(&e.Metrics.Sync.InProgress, 1)
+		atomic.AddUint64(&e.Metrics.Sync.PushPull, 1)
 	}
 }
 
@@ -132,31 +120,33 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		return
 	}
 
-	isResponse := false
+	needPush := false
+	switch sync.Type {
+	case pb.Sync_Unknown:
+		// won't ack to prevent infinite loop. treat it as a push.
+		needPush = false
+		atomic.AddUint64(&e.Metrics.Sync.IncomingPush, 1)
 
-	if r, inSync := e.inSync.Load(sync.Id); inSync {
-		to := r.([]string)
-		sort.Strings(from)
-		util.RangeOverStringSortedSet(from, to, nil, nil, func(s *string) bool {
-			isResponse = true
-			return false
-		})
-		atomic.AddUint64(&e.Metrics.Sync.InProgress, 0xFFFFFFFFFFFFFFFF) // -1
+	case pb.Sync_Push:
+		needPush = false
+		atomic.AddUint64(&e.Metrics.Sync.IncomingPush, 1)
+
+	case pb.Sync_PushPull:
+		needPush = true
+		atomic.AddUint64(&e.Metrics.Sync.IncomingPushPull, 1)
+
+	default:
+		return
 	}
 
-	if isResponse {
-		atomic.AddUint64(&e.Metrics.Sync.Success, 1)
-		e.inSync.Delete(sync.Id)
-	} else {
-		atomic.AddUint64(&e.Metrics.Sync.Incoming, 1)
-	}
-
-	asyncSendResp := func(snap *proto.Cluster) {
+	asyncSendPush := func(snap *proto.Cluster) {
 		e.arbiter.Go(func() {
 			e.sendProto(from, &pb.Sync{
 				Id:      sync.Id,
 				Cluster: snap,
+				Type:    pb.Sync_Push,
 			})
+			atomic.AddUint64(&e.Metrics.Sync.Push, 1)
 		})
 	}
 
@@ -177,7 +167,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 
 		self := e.cluster.Self()
 
-		fastResponse := true
+		fastPush := true
 
 		infos := make([]relatedInfo, len(sync.Cluster.Nodes))
 		for idx, mnode := range sync.Cluster.Nodes { // build relation info.
@@ -208,21 +198,21 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					return false
 				}
 			}
-			if !isResponse {
+			if needPush {
 				// can send response immediately?
-				if fastResponse && info.node != nil && info.tagInMsg != nil && info.tagInMsg.State == LEFT {
-					fastResponse = false
+				if fastPush && info.node != nil && info.tagInMsg != nil && info.tagInMsg.State == LEFT {
+					fastPush = false
 				}
 			}
 		}
 
-		if !isResponse {
+		if needPush {
 			// send response.
 			snap := e.newSyncClusterSnapshot(t)
-			if fastResponse {
-				asyncSendResp(snap)
+			if fastPush {
+				asyncSendPush(snap)
 			} else {
-				t.DeferOnCommit(func() { asyncSendResp(snap) })
+				t.DeferOnCommit(func() { asyncSendPush(snap) })
 			}
 		}
 
@@ -328,7 +318,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 					continue
 				}
 
-				if isResponse && node == self {
+				if !needPush && node == self {
 					selfSeen = true // the remote knows myself.
 				}
 			}
@@ -396,7 +386,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 			}
 		}
 
-		if isResponse {
+		if !needPush {
 			rawMessageID := sync.Id - e.counterSeed
 
 			// stage: trace self existence seen by others.

@@ -38,6 +38,13 @@ message PingReq {
 
 // Cluster member synchronization.
 message Sync {
+    enum Type {
+        Unknown = 0;
+        PushPull = 1;
+        Push = 2;
+    }
+
     uint64 id = 1;
     proto.Cluster cluster = 2;
+    Type type = 3;
 }

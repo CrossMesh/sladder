@@ -173,7 +173,6 @@ type EngineInstance struct {
 	innerTxnIDs sync.Map // map[uint32]struct{}
 
 	// sync fields.
-	inSync                sync.Map // map[uint64]struct{}
 	leavingNodes          []*leavingNode
 	leaveingNodeNameIndex map[string]int
 	reversedExistence     map[*sladder.Node]*reversedExistenceItem // trace self-existence from other nodes.

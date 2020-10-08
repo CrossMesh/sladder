@@ -36,11 +36,11 @@ type Metrics struct {
 	GossipFanout uint32
 
 	Sync struct {
-		InProgress uint64 // synchronization requests in progress.
-		Timeout    uint64 // bad requests caused by timeout.
-		Success    uint64 // successful synchronization requests.
+		IncomingPushPull uint64 // incoming push-pull requests.
+		PushPull         uint64 // sent push-pull requests.
 
-		Incoming uint64 // incoming synchronization requests.
+		IncomingPush uint64 // incoming push requests.
+		Push         uint64 // send push requests.
 	}
 
 	State StateMetrics

@@ -35,10 +35,11 @@ func TestSync(t *testing.T) {
 				{Key: "key1", Value: "v1"},
 				{Key: "key2", Value: "v2"},
 				{Key: "key3", Value: "v3"},
+				{Key: "key4", Value: "v4"},
 			},
 		}
 		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
-			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, true, true))
+			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, false, true))
 			return true
 		}))
 
@@ -60,7 +61,7 @@ func TestSync(t *testing.T) {
 		pb1.Kvs[1].Value = "v3"
 		pb1.Kvs[2].Value = "v4"
 		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
-			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, true, true))
+			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, false, true))
 			return true
 		}))
 		e = self.get("key1")
@@ -101,7 +102,7 @@ func TestSync(t *testing.T) {
 		pb1.Kvs[1] = pb1.Kvs[2]
 		pb1.Kvs = pb1.Kvs[:2]
 		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
-			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, true, true))
+			assert.NoError(t, tx.MergeNodeSnapshot(self, pb1, true, false, true))
 			return true
 		}))
 		e = self.get("key1")
@@ -120,7 +121,7 @@ func TestSync(t *testing.T) {
 		testError := errors.New("testerr")
 		m.AddFailKey("key1", testError)
 		assert.NoError(t, c.Txn(func(tx *Transaction) bool {
-			assert.Equal(t, testError, tx.MergeNodeSnapshot(self, pb1, true, true, true))
+			assert.Equal(t, testError, tx.MergeNodeSnapshot(self, pb1, true, false, true))
 			return false
 		}))
 		e = self.get("key1")

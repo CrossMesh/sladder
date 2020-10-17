@@ -98,6 +98,7 @@ func (t *Transaction) mergeNodeEntries(n *Node, deletion, failMissingValidator, 
 			if err != ErrValidatorMissing || failMissingValidator {
 				return nil, err
 			}
+			return nil, nil
 		}
 		if log.txn == nil {
 			err = fmt.Errorf("Got nil KVTransaction in op log. {key = %v, node = %v}", key, n.PrintableName())

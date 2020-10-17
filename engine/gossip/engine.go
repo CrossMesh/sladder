@@ -604,6 +604,7 @@ func (e *EngineInstance) Close() error {
 		}
 
 		if !canShutdown && timeout > 0 && time.Now().After(notWaitAfter) {
+			e.log.Warnf("leaving process seems not to be finished within %v. force to quit cluster.", timeout)
 			canShutdown = true
 		}
 

@@ -55,6 +55,112 @@ func TestFailureDetector(t *testing.T) {
 			})
 		})
 
+		t.Run("timeout", func(t *testing.T) {
+			t.Parallel()
+
+			requiredQuorum := uint(2)
+
+			god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 2, []sladder.EngineOption{
+				WithGossipPeriod(period),
+				WithQuitTimeout(time.Second * 2),
+				WithMinRegionPeer(requiredQuorum),
+			}, nil)
+			assert.NotNil(t, god)
+			assert.NotNil(t, ctl)
+			assert.NoError(t, err)
+			checkInitialSWIMStates(t, god)
+
+			var failVP *testClusterViewPoint
+
+			vps := god.VPList()
+			consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+				time.Sleep(period)
+				for _, vp := range vps {
+					if !vp.engine.canQuitTrivial() {
+						failVP = vp
+						break
+					}
+				}
+				return failVP == nil
+			}, true, true, false, func(e *EngineInstance) {
+				e.ClusterSync()
+				e.DetectFailure()
+				e.ClearSuspections()
+			})
+
+			if !assert.Less(t, consistAt, 200, "all node can quit trivially within 200 sync round. cannot continue the test.") {
+				t.FailNow()
+			}
+
+			t.Log("failed node: ", failVP.cv.Self().Names())
+
+			ctl.NetworkOutJam(failVP.cv.Self().Names())
+			ctl.NetworkInJam(failVP.cv.Self().Names())
+
+			quited := false
+			go func() {
+				failVP.cv.Quit()
+				quited = true
+			}()
+			assert.Eventually(t, func() bool { return quited }, time.Second*5, time.Second, "did not exit within 5 second.")
+			t.Log("finally states:")
+			dumpViewPoint(t, vps, true, true)
+		})
+
+		t.Run("timeout_infinite", func(t *testing.T) {
+			t.Parallel()
+
+			requiredQuorum := uint(2)
+
+			god, ctl, err := newHealthyClusterGod(t, "fd-tst", 2, 2, []sladder.EngineOption{
+				WithGossipPeriod(period),
+				WithQuitTimeout(0),
+				WithMinRegionPeer(requiredQuorum),
+			}, nil)
+			assert.NotNil(t, god)
+			assert.NotNil(t, ctl)
+			assert.NoError(t, err)
+			checkInitialSWIMStates(t, god)
+
+			var failVP *testClusterViewPoint
+
+			vps := god.VPList()
+			consistAt := syncLoop(t, vps, 200, func(round int) (unconsist bool) {
+				time.Sleep(period)
+				for _, vp := range vps {
+					if !vp.engine.canQuitTrivial() {
+						failVP = vp
+						break
+					}
+				}
+				return failVP == nil
+			}, true, true, false, func(e *EngineInstance) {
+				e.ClusterSync()
+				e.DetectFailure()
+				e.ClearSuspections()
+			})
+
+			if !assert.Less(t, consistAt, 200, "all node can quit trivially within 200 sync round. cannot continue the test.") {
+				t.FailNow()
+			}
+
+			t.Log("failed node: ", failVP.cv.Self().Names())
+
+			ctl.NetworkOutJam(failVP.cv.Self().Names())
+			ctl.NetworkInJam(failVP.cv.Self().Names())
+
+			quiting := true
+			go func() {
+				vps[0].cv.Quit()
+				quiting = false
+			}()
+			time.Sleep(5 * time.Second)
+			assert.True(t, quiting, "quited in case of infinite quit timeout.")
+
+			t.Log("finally states:")
+			dumpViewPoint(t, vps, true, true)
+		})
+
 		t.Run("normal", func(t *testing.T) {
 			t.Parallel()
 			requiredQuorum := uint(8)

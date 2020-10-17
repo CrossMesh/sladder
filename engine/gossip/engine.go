@@ -33,6 +33,7 @@ const (
 	defaultGossipPeriod      = time.Second
 	defaultMinimumRegionPeer = 1
 	defaultSWIMTagKey        = "_swim_tag"
+	defaultQuitTimeout       = time.Second * 30
 )
 
 type minRegionPeer uint
@@ -90,6 +91,13 @@ type manualClearSuspections struct{}
 // ManualClearSuspections disables auto suspections clearing. (for testing)
 func ManualClearSuspections() sladder.EngineOption { return manualClearSuspections{} }
 
+type quitTimeout time.Duration
+
+// WithQuitTimeout sets timeout for quiting process.
+// When QuitTimeout is reached, engine will be forced to shutdown despite incompleted spreading of LEAVE state.
+// Specially, 0 means infinite timeout.
+func WithQuitTimeout(d time.Duration) sladder.EngineOption { return quitTimeout(d) }
+
 // Engine provides methods to create gossip engine instance.
 type Engine struct{}
 
@@ -127,6 +135,8 @@ func New(transport Transport, options ...sladder.EngineOption) sladder.EngineIns
 			instance.disableFailureDetect = true
 		case manualSync:
 			instance.disableSync = true
+		case quitTimeout:
+			instance.QuitTimeout = time.Duration(v)
 		}
 	}
 	return instance
@@ -153,6 +163,7 @@ type EngineInstance struct {
 	swimTagKey              string
 	SuspectTimeout          time.Duration
 	GossipPeriod            time.Duration
+	QuitTimeout             time.Duration
 	region                  string
 	Fanout                  int32
 
@@ -197,6 +208,7 @@ func newInstanceDefault(transport Transport) *EngineInstance {
 		log:            sladder.DefaultLogger,
 		GossipPeriod:   defaultGossipPeriod,
 		Fanout:         1,
+		QuitTimeout:    defaultQuitTimeout,
 
 		withRegion: make(map[string]map[*sladder.Node]struct{}),
 
@@ -543,6 +555,24 @@ func (e *EngineInstance) Init(c *sladder.Cluster) (err error) {
 // Inited returns true if engine has already inited.
 func (e *EngineInstance) Inited() bool { return e.arbiter != nil }
 
+func (e *EngineInstance) canQuitTrivial() bool {
+	e.lock.RLock()
+	defer e.lock.RUnlock()
+
+	canQuit := true
+	for _, existenceTrace := range e.reversedExistence {
+		if existenceTrace.epoch < 1 {
+			continue
+		}
+		if existenceTrace.exist {
+			canQuit = false
+			break
+		}
+	}
+
+	return canQuit
+}
+
 // Close shutdown gossip engine instance.
 func (e *EngineInstance) Close() error {
 	// change state of self to LEAVE.
@@ -563,23 +593,18 @@ func (e *EngineInstance) Close() error {
 	}
 
 	e.quitAfter = atomic.AddUint64(&e.messageCounter, 1)
+	timeout := e.QuitTimeout
+	notWaitAfter := time.Now().Add(timeout)
 
 	// TODO(xutao): deal with the situation that more then one nodes are racing to quit.
 	e.tickGossipPeriodGo(func(deadline time.Time) {
 		canShutdown := e.canQuit
 		if !canShutdown {
+			canShutdown = e.canQuitTrivial()
+		}
+
+		if !canShutdown && timeout > 0 && time.Now().After(notWaitAfter) {
 			canShutdown = true
-			e.lock.RLock()
-			for _, existenceTrace := range e.reversedExistence {
-				if existenceTrace.epoch < 1 {
-					continue
-				}
-				if existenceTrace.exist {
-					canShutdown = false
-					break
-				}
-			}
-			e.lock.RUnlock()
 		}
 
 		if canShutdown {

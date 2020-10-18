@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/crossmesh/sladder"
@@ -271,8 +270,9 @@ func (e *EngineInstance) SetMinRegionPeer(n uint) (old uint) {
 	return
 }
 
-func (e *EngineInstance) generateMessageID() uint64 {
-	return atomic.AddUint64(&e.messageCounter, 1) + e.counterSeed
+func (e *EngineInstance) _generateMessageID() uint64 {
+	e.messageCounter++
+	return e.messageCounter + e.counterSeed
 }
 
 func (e *EngineInstance) getGossipFanout() int32 {
@@ -281,7 +281,7 @@ func (e *EngineInstance) getGossipFanout() int32 {
 		return 1
 	}
 
-	atomic.StoreUint32(&e.Metrics.GossipFanout, uint32(fanout))
+	e.Metrics.PublishGossipFanout(uint32(fanout))
 
 	return fanout
 }
@@ -305,7 +305,7 @@ func (e *EngineInstance) getMinPingReqTimeoutTimes() uint {
 func (e *EngineInstance) tickGossipPeriodGo(proc func(time.Time)) {
 	period := e.getGossipPeriod()
 
-	atomic.StoreUint64(&e.Metrics.GossipPeriod, uint64(period))
+	e.Metrics.PublishGossipPeriod(period)
 
 	e.arbiter.TickGo(func(cancel func(), deadline time.Time) {
 		proc(deadline)
@@ -592,7 +592,11 @@ func (e *EngineInstance) Close() error {
 		return err
 	}
 
-	e.quitAfter = atomic.AddUint64(&e.messageCounter, 1)
+	e.lock.Lock()
+	e.messageCounter++
+	e.quitAfter = e.messageCounter
+	e.lock.Unlock()
+
 	timeout := e.QuitTimeout
 	notWaitAfter := time.Now().Add(timeout)
 

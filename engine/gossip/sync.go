@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/crossmesh/sladder"
@@ -96,16 +95,22 @@ func (e *EngineInstance) ClusterSync() {
 		return false
 	}, sladder.MembershipModification())
 
+	minc := SyncMetricIncrement{}
+	defer e.Metrics.Sync.ApplyIncrement(&minc)
 	for _, node := range nodes {
-		id := e.generateMessageID()
+		e.lock.Lock()
+		id := e._generateMessageID()
+		e.lock.Unlock()
+
 		e.sendProto(node, &pb.Sync{
 			Id:      id,
 			Cluster: snap,
 			Type:    pb.Sync_PushPull,
 		})
 
-		atomic.AddUint64(&e.Metrics.Sync.PushPull, 1)
+		minc.PushPull++
 	}
+
 }
 
 func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMessage) {
@@ -120,20 +125,23 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 		return
 	}
 
+	minc := &SyncMetricIncrement{}
+	defer e.Metrics.Sync.ApplyIncrement(minc)
+
 	needPush := false
 	switch sync.Type {
 	case pb.Sync_Unknown:
 		// won't ack to prevent infinite loop. treat it as a push.
 		needPush = false
-		atomic.AddUint64(&e.Metrics.Sync.IncomingPush, 1)
+		minc.IncomingPush++
 
 	case pb.Sync_Push:
 		needPush = false
-		atomic.AddUint64(&e.Metrics.Sync.IncomingPush, 1)
+		minc.IncomingPush++
 
 	case pb.Sync_PushPull:
 		needPush = true
-		atomic.AddUint64(&e.Metrics.Sync.IncomingPushPull, 1)
+		minc.IncomingPushPull++
 
 	default:
 		return
@@ -146,7 +154,7 @@ func (e *EngineInstance) processSyncGossipProto(from []string, msg *pb.GossipMes
 				Cluster: snap,
 				Type:    pb.Sync_Push,
 			})
-			atomic.AddUint64(&e.Metrics.Sync.Push, 1)
+			minc.Push++
 		})
 	}
 
